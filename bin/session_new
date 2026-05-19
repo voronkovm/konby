@@ -118,12 +118,25 @@ stage="$(read_scalar stage "$task_file")"
 if [[ -z "$stage" ]]; then
   stage="backlog"
 fi
+status_now="$(read_scalar status "$task_file")"
+if [[ -z "$status_now" ]]; then
+  status_now="todo"
+fi
+success_status="$(read_scalar success_status "$agent_file")"
+if [[ -z "$success_status" ]]; then
+  success_status="done"
+fi
+failure_status="$(read_scalar failure_status "$agent_file")"
+if [[ -z "$failure_status" ]]; then
+  failure_status="blocked"
+fi
 
 workspace_dir="$(read_scalar workspace_dir "$task_file")"
 if [[ -z "$workspace_dir" ]]; then
   workspace_dir="$(pwd)"
 fi
 [[ -d "$workspace_dir" ]] || err "workspace_dir does not exist or is not a directory: $workspace_dir"
+task_abs_path="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
 
 task_base="$(basename "$task_file")"
 task_slug="$task_base"
@@ -144,9 +157,12 @@ Do the following task consiering comments and updates:
 ${task_text}
 
 Completion protocol:
-- If and only if your current stage work is fully completed successfully, include an exact standalone line:
-DISPATCH_RESULT: success
-- Do not print this marker if work is incomplete or blocked."
+- For success, update task yourself with:
+konby task move \"${task_abs_path}\" --stage \"${stage}\" --status \"${success_status}\" --comment \"<short summary>\"
+- For failure/blocker, update task yourself with:
+konby task move \"${task_abs_path}\" --stage \"${stage}\" --status \"${failure_status}\" --comment \"<short blocker reason>\"
+- If work is still in progress, keep status \"${status_now}\".
+- Do not output DISPATCH_RESULT markers."
 
 tmux new-session -d -s "$session_id" -c "$workspace_dir"
 tmux set-option -t "$session_id" mouse on
