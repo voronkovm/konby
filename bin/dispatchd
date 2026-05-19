@@ -3,14 +3,47 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 log_file="${TMPDIR:-/tmp}/code-conveyor-dispatchd.log"
+board_dir="$(pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  dispatchd [--log-file <path>] [--board <path>]
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --board|--dir)
+      [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 1; }
+      board_dir="$(cd "$2" && pwd)"
+      shift 2
+      ;;
+    --log-file)
+      [[ $# -ge 2 ]] || { echo "Error: --log-file requires a value" >&2; exit 1; }
+      log_file="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 nohup bash -c '
   set -euo pipefail
   root_dir="$1"
+  board_dir="$2"
+  log_file="$3"
   while true; do
-    "$root_dir/bin/dispatch" >> "$2" 2>&1 || true
+    "$root_dir/bin/dispatch" --board "$board_dir" >> "$log_file" 2>&1 || true
     sleep 5
   done
-' _ "$root_dir" "$log_file" >/dev/null 2>&1 &
+' _ "$root_dir" "$board_dir" "$log_file" >/dev/null 2>&1 &
 
 echo "PID: $!"

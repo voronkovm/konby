@@ -711,7 +711,34 @@ function parseMouseWheelDelta(key) {
 }
 
 function main() {
-  const projectDir = path.resolve(__dirname, '..');
+  const argv = process.argv.slice(2);
+  let projectDir = process.cwd();
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (token === '--help' || token === '-h') {
+      process.stdout.write('Usage: board_show [path] [--board <path>]\n');
+      return;
+    }
+    if (token === '--board') {
+      const next = argv[i + 1];
+      if (!next) throw new Error('Missing value after --board');
+      projectDir = path.resolve(next);
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--board=')) {
+      projectDir = path.resolve(token.slice('--board='.length));
+      continue;
+    }
+    if (token.startsWith('-')) {
+      throw new Error(`Unknown argument: ${token}`);
+    }
+    if (projectDir !== process.cwd()) {
+      throw new Error('Usage: board_show [path] [--board <path>]');
+    }
+    projectDir = path.resolve(token);
+  }
+
   const stateRef = {
     projectDir,
     board: loadBoard(projectDir),

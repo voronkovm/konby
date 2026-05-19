@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE_PATH" ]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+  [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
+done
+SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+KONBY_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  board_new <path> [--preset <name>] [--workspace <path>] [--force]
+USAGE
+}
+
+err() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+create_file_if_missing() {
+  local src="$1"
+  local dst="$2"
+  local force="$3"
+
+  if [[ -f "$dst" && "$force" != "true" ]]; then
+    echo "Skip existing file: $dst"
+    return
+  fi
+
+  cp "$src" "$dst"
+  echo "Created: $dst"
+}
+
+copy_preset_tree() {
+  local src_root="$1"
+  local dst_root="$2"
+  local force="$3"
+  local rel
+
+  while IFS= read -r rel; do
+    [[ "$rel" == "." ]] && continue
+    rel="${rel#./}"
+    mkdir -p "$dst_root/$rel"
+  done < <(cd "$src_root" && find . -type d | LC_ALL=C sort)
+
+  while IFS= read -r rel; do
+    [[ "$rel" == "." ]] && continue
+    rel="${rel#./}"
+    create_file_if_missing "$src_root/$rel" "$dst_root/$rel" "$force"
+  done < <(cd "$src_root" && find . -type f | LC_ALL=C sort)
+}
+
+resolve_preset_dir() {
+  local preset_name="$1"
+  local preset_dir="$KONBY_HOME/presets/$preset_name"
+  [[ -d "$preset_dir" ]] || err "Preset not found: $preset_name ($preset_dir)"
+  [[ -f "$preset_dir/dispatch.yml" ]] || err "Preset $preset_name missing dispatch.yml"
+  [[ -f "$preset_dir/task.schema.yml" ]] || err "Preset $preset_name missing task.schema.yml"
+  [[ -d "$preset_dir/agents" ]] || err "Preset $preset_name missing agents/ directory"
+  echo "$preset_dir"
+}
+
+set_workspace_default() {
+  local schema_file="$1"
+  local workspace_path="$2"
+  local tmp_file
+  tmp_file="$(mktemp)"
+
+  awk -v ws="$workspace_path" '
+    BEGIN { in_ws = 0 }
+    /^[[:space:]]*(workspace|workspace_dir):/ { in_ws = 1; print; next }
+    in_ws && /^[^[:space:]]/ { in_ws = 0 }
+    in_ws && /^[[:space:]]*default:/ { print "    default: \"" ws "\""; next }
+    { print }
+  ' "$schema_file" > "$tmp_file"
+
+  mv "$tmp_file" "$schema_file"
+  echo "Updated workspace default in: $schema_file"
+}
+
+main() {
+  [[ $# -gt 0 ]] || { usage; exit 1; }
+  [[ "$1" != "--help" && "$1" != "-h" ]] || { usage; exit 0; }
+
+  local board_path="$1"
+  shift
+  local preset_name="swe"
+  local workspace_path=""
+  local force="false"
+  local target_dir
+  local preset_dir
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --preset)
+        shift
+        [[ $# -gt 0 ]] || err "Missing value after --preset"
+        preset_name="$1"
+        ;;
+      --workspace)
+        shift
+        [[ $# -gt 0 ]] || err "Missing value after --workspace"
+        workspace_path="$1"
+        ;;
+      --force)
+        force="true"
+        ;;
+      *) err "Unknown argument: $1" ;;
+    esac
+    shift
+  done
+
+  [[ -n "$board_path" ]] || err "Board path is required"
+  preset_dir="$(resolve_preset_dir "$preset_name")"
+  if [[ "$board_path" = /* ]]; then
+    target_dir="$board_path"
+  else
+    target_dir="$(pwd)/$board_path"
+  fi
+
+  mkdir -p "$target_dir"
+  copy_preset_tree "$preset_dir" "$target_dir" "$force"
+  mkdir -p "$target_dir/tasks" "$target_dir/transcripts"
+  echo "Ensured dirs: tasks/ transcripts/"
+  if [[ -n "$workspace_path" ]]; then
+    set_workspace_default "$target_dir/task.schema.yml" "$workspace_path"
+  fi
+
+  echo "Board initialized in: $target_dir (preset: $preset_name)"
+}
+
+main "$@"

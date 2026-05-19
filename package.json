@@ -1,0 +1,14 @@
+{
+  "name": "konby",
+  "version": "0.1.0",
+  "description": "Konby CLI for board bootstrap and local setup",
+  "bin": {
+    "konby": "bin/konby"
+  },
+  "files": [
+    "bin",
+    "presets",
+    "README.md"
+  ],
+  "license": "UNLICENSED"
+}

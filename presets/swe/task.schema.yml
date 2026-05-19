@@ -71,11 +71,11 @@ properties:
       minLength: 1
     uniqueItems: true
 
-  workspace_dir:
+  workspace:
     type: string
     minLength: 1
     description: "Local workspace directory for the task"
-    default: "/Users/user/Documents/projects/code-conveyor/demo-workspace"
+    default: "./"
 
   created_at:
     type: string

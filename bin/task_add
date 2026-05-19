@@ -456,9 +456,9 @@ function usage(schema) {
   const keys = Object.keys(schema.properties || {});
   return [
     'Usage:',
-    '  add_task [--dir <tasks_dir>] [--schema <task.schema.yml>] --title "..." [--id 10-my-task] [--status todo] [--priority medium] [--stage backlog]',
-    '  add_task Текст задачи без параметра title',
-    '  add_task --dir tasks --set title="Fix bug" --set status=in_progress --set priority=critical',
+    '  task_add [--tasks <tasks_dir_rel>] [--schema <task.schema.yml>] --title "..." [--id 10-my-task] [--status todo] [--priority medium] [--stage backlog] [--board <path>]',
+    '  task_add Текст задачи без параметра title',
+    '  task_add --board ./my-board --set title="Fix bug" --set status=in_progress --set priority=critical',
     '',
     `Known fields from schema: ${keys.join(', ')}`,
     'If --id is omitted, id is auto-generated from title.',
@@ -614,11 +614,29 @@ async function writeTaskFile(dirPath, obj, force, schema) {
 }
 
 async function main() {
-  const projectDir = path.resolve(__dirname, '..');
-  loadDotEnv(projectDir);
   const args = parseArgs(process.argv.slice(2));
-  const schemaPath = path.resolve(args.values.schema || 'task.schema.yml');
-  const targetDir = path.resolve(args.values.dir || args.values.file || 'tasks');
+  const boardDir = path.resolve(args.values.board || args.values.dir || process.cwd());
+  const projectDir = boardDir;
+  loadDotEnv(projectDir);
+  const schemaPath = path.resolve(projectDir, args.values.schema || 'task.schema.yml');
+  const targetDir = path.resolve(projectDir, args.values.tasks || args.values.file || 'tasks');
+  const argsForTask = {
+    ...args,
+    values: { ...args.values },
+  };
+  delete argsForTask.values.board;
+  delete argsForTask.values.dir;
+  delete argsForTask.values.schema;
+  delete argsForTask.values.tasks;
+  delete argsForTask.values.file;
+
+  if (args.help) {
+    const schema = fs.existsSync(schemaPath)
+      ? parseYamlSimple(fs.readFileSync(schemaPath, 'utf8'))
+      : { properties: {} };
+    console.log(usage(schema));
+    process.exit(0);
+  }
 
   if (!fs.existsSync(schemaPath)) {
     throw new Error(`Schema not found: ${schemaPath}`);
@@ -626,12 +644,7 @@ async function main() {
 
   const schema = parseYamlSimple(fs.readFileSync(schemaPath, 'utf8'));
 
-  if (args.help) {
-    console.log(usage(schema));
-    process.exit(0);
-  }
-
-  const task = buildTask(args, schema);
+  const task = buildTask(argsForTask, schema);
   const schemaTypes =
     schema &&
     schema.properties &&
@@ -642,8 +655,8 @@ async function main() {
   const meta = await generateTaskMetaWithOpenAI(task.title || '', schemaTypes);
 
   const userProvidedType =
-    Object.prototype.hasOwnProperty.call(args.values, 'type') ||
-    args.set.some((pair) => pair.startsWith('type='));
+    Object.prototype.hasOwnProperty.call(argsForTask.values, 'type') ||
+    argsForTask.set.some((pair) => pair.startsWith('type='));
 
   if (!userProvidedType) {
     task.type = normalizeTaskType(meta.type, schemaTypes);

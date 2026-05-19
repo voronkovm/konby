@@ -186,8 +186,8 @@ function applyRule(task, rule) {
 }
 
 function runAgent(projectDir, agent, taskPath) {
-  const cmd = path.join(projectDir, 'bin', 'new_session');
-  const out = spawnSync(cmd, ['--agent', agent, '--task', taskPath], {
+  const cmd = path.join(__dirname, 'session_new');
+  const out = spawnSync(cmd, ['--board', projectDir, '--agent', agent, '--task', taskPath], {
     cwd: projectDir,
     encoding: 'utf8',
   });
@@ -461,8 +461,9 @@ async function evaluateNonNewTasks(projectDir, tasks) {
   return updates;
 }
 
-function acquireLock() {
-  const lockDir = path.join(os.tmpdir(), 'code-conveyor-dispatch.lock');
+function acquireLock(projectDir) {
+  const safe = path.resolve(projectDir).replace(/[^A-Za-z0-9_.-]/g, '_');
+  const lockDir = path.join(os.tmpdir(), `code-conveyor-dispatch.lock.${safe}`);
   const ownerFile = path.join(lockDir, 'owner.json');
 
   function isPidRunning(pid) {
@@ -495,14 +496,39 @@ function acquireLock() {
 }
 
 async function main() {
-  const releaseLock = acquireLock();
+  const argv = process.argv.slice(2);
+  let projectDir = process.cwd();
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (token === '--board' || token === '--dir') {
+      const next = argv[i + 1];
+      if (!next) throw new Error(`Missing value after ${token}`);
+      projectDir = path.resolve(next);
+      i += 1;
+      continue;
+    }
+    if (token.startsWith('--board=')) {
+      projectDir = path.resolve(token.slice('--board='.length));
+      continue;
+    }
+    if (token.startsWith('--dir=')) {
+      projectDir = path.resolve(token.slice('--dir='.length));
+      continue;
+    }
+    if (token === '--help' || token === '-h') {
+      console.log('Usage: dispatch [--board <path>]');
+      return;
+    }
+    throw new Error(`Unknown argument: ${token}`);
+  }
+
+  const releaseLock = acquireLock(projectDir);
   if (!releaseLock) {
     console.log('Skipped: bin/dispatch is already running');
     return;
   }
 
   try {
-    const projectDir = path.resolve(__dirname, '..');
     const dispatchPath = path.join(projectDir, 'dispatch.yml');
     const tasksDir = path.join(projectDir, 'tasks');
 

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE_PATH" ]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+  [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
+done
+SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+
+KONBY_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
+KONBY_BIN_DIR="$KONBY_HOME/bin"
+
+usage() {
+  cat <<'USAGE'
+konby - streamline teams of agents using kanban boards
+
+Usage steps:
+  1. Create a new board:
+    `konby board new <path> [--preset <name>] [--workspace <path>] [--force]`
+
+  2. Adjust rules if needed:
+    - board structure and dispatching rules in <path>/dispatch.yml
+    - agents roles in<path>/agents/*.yml 
+
+  3. Add a task to the board (stored in <path>/tasks/*.yml):
+    `konby task add --title "..." [--board <path>]`
+
+  4. Run dispatcher continuously in background loop:
+    `konby dispatchd [--log-file <path>] [--board <path>]`
+    
+  5. Watch tasks getting done:
+    `konby board show [--board <path>]`
+
+Additional commands:
+  konby help
+    This help message.
+  konby session new --agent <agent> --task <task-file> [--board <path>]
+    Manually start a tmux agent session for one task.
+  konby dispatch [--board <path>]
+    Nudge dispatcher once to apply dispatch.yml rules, move tasks, and trigger agent sessions.
+
+Examples:
+  konby task add --title "Add OAuth login" --board ./my-board
+  konby dispatchd --log-file /tmp/konby-dispatchd.log --board ./my-board
+USAGE
+}
+
+err() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+ensure_path() {
+  local shell_name="$1"
+  local rc_file
+
+  case "$shell_name" in
+    zsh) rc_file="$HOME/.zshrc" ;;
+    bash) rc_file="$HOME/.bashrc" ;;
+    *) err "Unsupported shell: $shell_name (expected zsh or bash)" ;;
+  esac
+
+  local line="export PATH=\"$KONBY_BIN_DIR:\$PATH\""
+  touch "$rc_file"
+
+  if grep -Fq "$line" "$rc_file"; then
+    echo "PATH already configured in $rc_file"
+  else
+    echo "$line" >> "$rc_file"
+    echo "Added to $rc_file: $line"
+  fi
+
+  export PATH="$KONBY_BIN_DIR:$PATH"
+  echo "PATH updated for current shell process."
+}
+
+cmd_install() {
+  local shell_name="zsh"
+  local board_name=""
+  local target_dir="$(pwd)"
+  local preset_name="swe"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --shell)
+        shift
+        [[ $# -gt 0 ]] || err "Missing value after --shell"
+        shell_name="$1"
+        ;;
+      --board)
+        shift
+        [[ $# -gt 0 ]] || err "Missing value after --board"
+        board_name="$1"
+        ;;
+      --dir)
+        shift
+        [[ $# -gt 0 ]] || err "Missing value after --dir"
+        target_dir="$1"
+        ;;
+      --preset)
+        shift
+        [[ $# -gt 0 ]] || err "Missing value after --preset"
+        preset_name="$1"
+        ;;
+      *) err "Unknown option for install: $1" ;;
+    esac
+    shift
+  done
+
+  ensure_path "$shell_name"
+
+  if [[ -n "$board_name" ]]; then
+    "$KONBY_BIN_DIR/board_new" "$target_dir/$board_name" --preset "$preset_name"
+  fi
+
+  echo "If command is not found in your current terminal, run: source ~/.${shell_name}rc"
+}
+
+main() {
+  [[ $# -gt 0 ]] || { usage; exit 0; }
+
+  case "$1" in
+    help|--help|-h)
+      usage
+      ;;
+    install)
+      shift
+      cmd_install "$@"
+      ;;
+    board)
+      shift
+      [[ $# -gt 0 ]] || err "Usage: konby board <new|show> ..."
+      case "$1" in
+        new)
+          shift
+          "$KONBY_BIN_DIR/board_new" "$@"
+          ;;
+        show)
+          shift
+          "$KONBY_BIN_DIR/board_show" "$@"
+          ;;
+        *) err "Unknown board subcommand: $1" ;;
+      esac
+      ;;
+    task)
+      shift
+      [[ $# -gt 0 ]] || err "Usage: konby task add ..."
+      case "$1" in
+        add)
+          shift
+          "$KONBY_BIN_DIR/task_add" "$@"
+          ;;
+        *) err "Unknown task subcommand: $1" ;;
+      esac
+      ;;
+    session)
+      shift
+      [[ $# -gt 0 ]] || err "Usage: konby session new ..."
+      case "$1" in
+        new)
+          shift
+          "$KONBY_BIN_DIR/session_new" "$@"
+          ;;
+        *) err "Unknown session subcommand: $1" ;;
+      esac
+      ;;
+    dispatch)
+      shift
+      "$KONBY_BIN_DIR/dispatch" "$@"
+      ;;
+    dispatchd)
+      shift
+      "$KONBY_BIN_DIR/dispatchd" "$@"
+      ;;
+    *) err "Unknown command: $1" ;;
+  esac
+}
+
+main "$@"
