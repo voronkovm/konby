@@ -1,0 +1,866 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+
+function parseScalar(value) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (value === 'null') return null;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  if (value === '-') return '-';
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseYamlSimple(input) {
+  const root = {};
+  const stack = [{ indent: -1, kind: 'object', value: root }];
+  const lines = input.replace(/\t/g, '  ').split(/\r?\n/);
+
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const raw = lines[idx];
+    if (!raw.trim() || raw.trim().startsWith('#')) continue;
+
+    const indent = raw.match(/^\s*/)[0].length;
+    const line = raw.trim();
+
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+    const parent = stack[stack.length - 1];
+
+    if (line.startsWith('- ')) {
+      if (parent.kind !== 'array') throw new Error(`Invalid YAML list item at line ${idx + 1}`);
+      const content = line.slice(2).trim();
+      if (!content) {
+        const node = {};
+        parent.value.push(node);
+        stack.push({ indent, kind: 'object', value: node });
+        continue;
+      }
+      const keyMatch = content.match(/^([^:]+):(.*)$/);
+      if (keyMatch) {
+        const key = keyMatch[1].trim();
+        const rawValue = keyMatch[2].trim();
+        const node = {};
+        node[key] = rawValue ? parseScalar(rawValue) : {};
+        parent.value.push(node);
+        if (!rawValue) {
+          stack.push({ indent, kind: 'object', value: node[key] });
+        } else {
+          stack.push({ indent, kind: 'object', value: node });
+        }
+        continue;
+      }
+      parent.value.push(parseScalar(content));
+      continue;
+    }
+
+    if (parent.kind !== 'object') throw new Error(`Invalid YAML map entry at line ${idx + 1}`);
+
+    const match = line.match(/^([^:]+):(.*)$/);
+    if (!match) throw new Error(`Cannot parse YAML line ${idx + 1}: ${line}`);
+
+    const key = match[1].trim();
+    const rawValue = match[2].trim();
+
+    if (!rawValue) {
+      const nextLine = lines.slice(idx + 1).find((l) => l.trim() && !l.trim().startsWith('#'));
+      const nextTrim = nextLine ? nextLine.trim() : '';
+      const isArray = nextTrim.startsWith('- ');
+      if (isArray) {
+        const arr = [];
+        parent.value[key] = arr;
+        stack.push({ indent, kind: 'array', value: arr });
+      } else {
+        const obj = {};
+        parent.value[key] = obj;
+        stack.push({ indent, kind: 'object', value: obj });
+      }
+      continue;
+    }
+
+    parent.value[key] = parseScalar(rawValue);
+  }
+
+  return root;
+}
+
+function loadYaml(filePath) {
+  return parseYamlSimple(fs.readFileSync(filePath, 'utf8'));
+}
+
+function yamlScalar(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'string' && /^[A-Za-z0-9_./:@+-]+$/.test(value)) return value;
+  return JSON.stringify(value);
+}
+
+function formatYaml(value, indent = 0) {
+  const sp = ' '.repeat(indent);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `${sp}[]`;
+    return value.map((item) => {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const nested = formatYaml(item, indent + 2).split('\n');
+        return `${sp}- ${nested[0].trimStart()}\n${nested.slice(1).join('\n')}`;
+      }
+      return `${sp}- ${yamlScalar(item)}`;
+    }).join('\n');
+  }
+
+  const lines = [];
+  for (const [key, val] of Object.entries(value)) {
+    if (Array.isArray(val)) {
+      if (val.length === 0) lines.push(`${sp}${key}: []`);
+      else lines.push(`${sp}${key}:\n${formatYaml(val, indent + 2)}`);
+      continue;
+    }
+    if (val && typeof val === 'object') {
+      lines.push(`${sp}${key}:\n${formatYaml(val, indent + 2)}`);
+      continue;
+    }
+    lines.push(`${sp}${key}: ${yamlScalar(val)}`);
+  }
+  return lines.join('\n');
+}
+
+function saveYaml(filePath, obj) {
+  fs.writeFileSync(filePath, `${formatYaml(obj)}\n`, 'utf8');
+}
+
+function locateDispatch(projectDir) {
+  const candidates = ['displatch.yml', 'dispatch.yml'];
+  for (const name of candidates) {
+    const full = path.join(projectDir, name);
+    if (fs.existsSync(full)) return full;
+  }
+  throw new Error('Neither displatch.yml nor dispatch.yml exists');
+}
+
+function readTasks(tasksDir) {
+  if (!fs.existsSync(tasksDir)) return [];
+  const files = fs.readdirSync(tasksDir).filter((f) => /\.ya?ml$/i.test(f));
+  return files
+    .map((file) => {
+      const full = path.join(tasksDir, file);
+      const data = loadYaml(full);
+      return {
+        file,
+        path: full,
+        data,
+        id: data.id || file.replace(/\.ya?ml$/i, ''),
+        title: data.title || '',
+        stage: data.stage || 'backlog',
+        status: data.status || 'todo',
+        assignee: data.assignee || '-',
+      };
+    })
+    .sort((a, b) => a.file.localeCompare(b.file));
+}
+
+function truncate(text, maxLen) {
+  const value = String(text);
+  if (maxLen <= 1) return value.slice(0, maxLen);
+  if (value.length <= maxLen) return value;
+  return `${value.slice(0, maxLen - 1)}…`;
+}
+
+function wrapText(text, maxLen) {
+  const value = String(text);
+  if (maxLen <= 0) return [value];
+  const out = [];
+  for (let i = 0; i < value.length; i += maxLen) out.push(value.slice(i, i + maxLen));
+  return out.length > 0 ? out : [''];
+}
+
+function taskLabel(task) {
+  const raw = String(task.id || '');
+  const match = raw.match(/^(\d+)/);
+  const shortId = match ? match[1] : raw;
+  const title = task.title && String(task.title).trim() ? String(task.title).trim() : raw;
+  return `#${shortId} - ${title}`;
+}
+
+function buildTasksByColumn(columns, tasks) {
+  const stageToColumn = new Map();
+  for (const col of columns) for (const stage of col.stages || []) stageToColumn.set(stage, col.name);
+
+  const tasksByColumn = new Map(columns.map((c) => [c.name, []]));
+  const unknown = [];
+  for (const task of tasks) {
+    const col = stageToColumn.get(task.stage);
+    if (!col) unknown.push(task);
+    else tasksByColumn.get(col).push(task);
+  }
+  if (unknown.length > 0) {
+    if (!tasksByColumn.has('unmapped')) tasksByColumn.set('unmapped', []);
+    tasksByColumn.get('unmapped').push(...unknown);
+  }
+  return tasksByColumn;
+}
+
+function loadBoard(projectDir) {
+  const dispatchFile = locateDispatch(projectDir);
+  const cfg = loadYaml(dispatchFile);
+  const columns = cfg.board && Array.isArray(cfg.board.columns) ? cfg.board.columns : [];
+  if (columns.length === 0) throw new Error(`No board.columns in ${path.basename(dispatchFile)}`);
+  const tasksDir = path.join(projectDir, 'tasks');
+  const tasks = readTasks(tasksDir);
+  const tasksByColumn = buildTasksByColumn(columns, tasks);
+  return { dispatchFile, tasksDir, columns, tasksByColumn, tasks };
+}
+
+function visibleColumns(state) {
+  const cols = [...state.columns];
+  if (state.tasksByColumn.has('unmapped')) cols.push({ name: 'unmapped', wip_limit: '-', stages: [] });
+  return cols;
+}
+
+function normalizeSelection(stateRef) {
+  const cols = visibleColumns(stateRef.board);
+  if (cols.length === 0) {
+    stateRef.selectedCol = 0;
+    stateRef.selectedTask = 0;
+    return;
+  }
+  if (stateRef.selectedCol >= cols.length) stateRef.selectedCol = cols.length - 1;
+  if (stateRef.selectedCol < 0) stateRef.selectedCol = 0;
+
+  const selectedColName = cols[stateRef.selectedCol].name;
+  const tasks = stateRef.board.tasksByColumn.get(selectedColName) || [];
+  if (tasks.length === 0) stateRef.selectedTask = 0;
+  else {
+    if (stateRef.selectedTask >= tasks.length) stateRef.selectedTask = tasks.length - 1;
+    if (stateRef.selectedTask < 0) stateRef.selectedTask = 0;
+  }
+}
+
+function selectedTask(stateRef) {
+  const cols = visibleColumns(stateRef.board);
+  if (!cols[stateRef.selectedCol]) return null;
+  const tasks = stateRef.board.tasksByColumn.get(cols[stateRef.selectedCol].name) || [];
+  if (tasks.length === 0) return null;
+  return tasks[stateRef.selectedTask] || null;
+}
+
+function ansiInverse(text) {
+  return `\x1b[7m${text}\x1b[0m`;
+}
+
+function renderBoard(stateRef) {
+  const state = stateRef.board;
+  const cols = visibleColumns(state);
+  const totalWidth = process.stdout.columns || 120;
+  const gap = 2;
+  const colCount = Math.max(cols.length, 1);
+  const colWidth = Math.max(24, Math.floor((totalWidth - gap * (colCount - 1)) / colCount));
+
+  const header = `KANBAN  ${new Date().toLocaleString()}  config=${path.basename(state.dispatchFile)}  (Ctrl+C to quit)`;
+  const lines = [truncate(header, totalWidth)];
+  lines.push('Hotkeys: a - add new task | m - move task | x - archive task | arrows - navigate');
+  lines.push('');
+
+  const colLines = cols.map((col, colIndex) => {
+    const tasks = state.tasksByColumn.get(col.name) || [];
+    const limit = col.wip_limit === undefined ? '-' : String(col.wip_limit);
+    const title = `${col.name} [${tasks.length}/${limit}]`;
+    const out = [truncate(title, colWidth), '-'.repeat(colWidth)];
+
+    for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+      const task = tasks[taskIndex];
+      const selected = colIndex === stateRef.selectedCol && taskIndex === stateRef.selectedTask;
+      const taskLines = [
+        ...wrapText(taskLabel(task), colWidth),
+        truncate(`@${task.assignee}`, colWidth),
+        truncate(`${task.stage}/${task.status}`, colWidth),
+      ];
+      for (let i = 0; i < taskLines.length; i += 1) {
+        const line = taskLines[i];
+        out.push(selected ? ansiInverse(line.padEnd(colWidth, ' ')) : line);
+      }
+      out.push('');
+    }
+
+    if (tasks.length === 0) out.push('(empty)');
+    return out;
+  });
+
+  const maxHeight = Math.max(...colLines.map((x) => x.length));
+  for (let i = 0; i < maxHeight; i += 1) {
+    const rowParts = colLines.map((col) => {
+      const chunk = col[i] || '';
+      if (chunk.includes('\x1b[')) return chunk;
+      return chunk.padEnd(colWidth, ' ');
+    });
+    lines.push(rowParts.join(' '.repeat(gap)).replace(/\s+$/, ''));
+  }
+
+  if (stateRef.message) lines.push(`Status: ${stateRef.message}`);
+  if (stateRef.mode === 'move') {
+    lines.push('');
+    lines.push('Move task: (↑/↓ switch field, ←/→ select value, Enter save, Esc cancel)');
+    const marker = (field) => (stateRef.moveField === field ? '>' : ' ');
+    lines.push(`${marker('stage')} stage: ${stateRef.moveDraft.stage}`);
+    lines.push(`${marker('status')} status: ${stateRef.moveDraft.status}`);
+    lines.push(`${marker('assignee')} assignee: ${stateRef.moveDraft.assignee}`);
+  }
+  if (stateRef.mode === 'add') {
+    lines.push('');
+    lines.push('Add task popup (Enter save, Esc cancel):');
+    lines.push(`title: ${stateRef.addBuffer}`);
+  }
+
+  return lines.join('\n');
+}
+
+function renderTaskDetails(stateRef) {
+  const task = selectedTask(stateRef);
+  const totalWidth = process.stdout.columns || 120;
+  const height = process.stdout.rows || 40;
+  const bodyHeight = Math.max(5, height - 6);
+  const lines = [];
+  const header = `TASK  ${task ? task.file : '(not found)'}  (Esc to board)`;
+  lines.push(truncate(header, totalWidth));
+  lines.push('Hotkeys: a - add new task | m - move task | x - archive task | c - comment | arrows/mouse wheel - scroll');
+  lines.push('');
+
+  if (!task) {
+    lines.push('Task not found.');
+    return lines.join('\n');
+  }
+
+  const details = formatYaml(task.data).split('\n');
+  const maxOffset = Math.max(0, details.length - bodyHeight);
+  if (stateRef.detailsScroll > maxOffset) stateRef.detailsScroll = maxOffset;
+  if (stateRef.detailsScroll < 0) stateRef.detailsScroll = 0;
+  const slice = details.slice(stateRef.detailsScroll, stateRef.detailsScroll + bodyHeight);
+  for (const line of slice) lines.push(truncate(line, totalWidth));
+
+  if (details.length > bodyHeight) {
+    lines.push('');
+    lines.push(`Scroll: ${stateRef.detailsScroll + 1}-${Math.min(stateRef.detailsScroll + bodyHeight, details.length)} / ${details.length}`);
+  }
+  if (stateRef.message) lines.push(`Status: ${stateRef.message}`);
+  if (stateRef.mode === 'comment') {
+    lines.push('');
+    lines.push('Add comment (Enter save, Esc cancel):');
+    lines.push(`text: ${stateRef.commentBuffer}`);
+  }
+
+  return lines.join('\n');
+}
+
+function snapshotInputs(projectDir) {
+  const parts = [];
+  const dispatchCandidates = ['displatch.yml', 'dispatch.yml'].map((f) => path.join(projectDir, f));
+  for (const file of dispatchCandidates) {
+    try {
+      const st = fs.statSync(file);
+      parts.push(`${file}:${st.mtimeMs}:${st.size}`);
+    } catch (_) {
+      parts.push(`${file}:missing`);
+    }
+  }
+
+  const tasksDir = path.join(projectDir, 'tasks');
+  try {
+    const files = fs.readdirSync(tasksDir).filter((f) => /\.ya?ml$/i.test(f)).sort();
+    for (const file of files) {
+      const full = path.join(tasksDir, file);
+      try {
+        const st = fs.statSync(full);
+        parts.push(`${full}:${st.mtimeMs}:${st.size}`);
+      } catch (_) {
+        parts.push(`${full}:missing`);
+      }
+    }
+  } catch (_) {
+    parts.push(`${tasksDir}:missing`);
+  }
+
+  return parts.join('|');
+}
+
+function refreshBoard(stateRef) {
+  stateRef.board = loadBoard(stateRef.projectDir);
+  normalizeSelection(stateRef);
+}
+
+function redraw(stateRef) {
+  try {
+    const output = stateRef.mode === 'details' || stateRef.mode === 'comment'
+      ? renderTaskDetails(stateRef)
+      : renderBoard(stateRef);
+    process.stdout.write('\x1Bc');
+    process.stdout.write(`${output}\n`);
+  } catch (err) {
+    process.stdout.write('\x1Bc');
+    process.stdout.write(`KANBAN ERROR\n\n${err.message}\n`);
+  }
+}
+
+function setMessage(stateRef, text) {
+  stateRef.message = text;
+  stateRef.messageAt = Date.now();
+}
+
+function moveSelection(stateRef, dx, dy) {
+  const cols = visibleColumns(stateRef.board);
+  if (cols.length === 0) return;
+  stateRef.selectedCol = Math.max(0, Math.min(cols.length - 1, stateRef.selectedCol + dx));
+  const tasks = stateRef.board.tasksByColumn.get(cols[stateRef.selectedCol].name) || [];
+  if (tasks.length === 0) stateRef.selectedTask = 0;
+  else stateRef.selectedTask = Math.max(0, Math.min(tasks.length - 1, stateRef.selectedTask + dy));
+}
+
+function updateTaskFile(task, updates) {
+  const data = loadYaml(task.path);
+  if (updates.stage !== undefined) data.stage = updates.stage;
+  if (updates.status !== undefined) data.status = updates.status;
+  if (updates.assignee !== undefined) data.assignee = updates.assignee;
+  data.updated_at = new Date().toISOString();
+  saveYaml(task.path, data);
+}
+
+function archiveTask(task, projectDir) {
+  const archiveDir = path.join(projectDir, 'tasks', '.archive');
+  fs.mkdirSync(archiveDir, { recursive: true });
+  const dest = path.join(archiveDir, task.file);
+  fs.renameSync(task.path, dest);
+}
+
+function addTaskComment(task, text) {
+  const data = loadYaml(task.path);
+  if (!Array.isArray(data.comments)) data.comments = [];
+  data.comments.push({
+    author: 'user',
+    text,
+    created_at: new Date().toISOString(),
+  });
+  data.updated_at = new Date().toISOString();
+  saveYaml(task.path, data);
+}
+
+function nextTaskNumber(tasksDir) {
+  try {
+    const files = fs.readdirSync(tasksDir).filter((f) => /\.ya?ml$/i.test(f));
+    let max = 0;
+    for (const file of files) {
+      const m = file.match(/^(\d+)/);
+      if (!m) continue;
+      max = Math.max(max, Number(m[1]));
+    }
+    return max + 1;
+  } catch (_) {
+    return 1;
+  }
+}
+
+function slugify(input) {
+  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'task';
+}
+
+function addTask(projectDir, title) {
+  const tasksDir = path.join(projectDir, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+  const n = nextTaskNumber(tasksDir);
+  const fileName = `${n}-${slugify(title)}.yaml`;
+  const now = new Date().toISOString();
+  const data = {
+    title,
+    type: 'task',
+    stage: 'backlog',
+    status: 'todo',
+    priority: 'medium',
+    created_at: now,
+    workspace_dir: path.join(projectDir, 'demo-workspace'),
+    assignee: 'bsa',
+    updated_at: now,
+  };
+  saveYaml(path.join(tasksDir, fileName), data);
+  return fileName;
+}
+
+function startMovePopup(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  stateRef.mode = 'move';
+  stateRef.moveField = 'stage';
+  stateRef.moveDraft = {
+    stage: task.stage,
+    status: task.status,
+    assignee: task.assignee,
+  };
+  stateRef.moveOptions = buildMoveOptions(stateRef);
+  stateRef.moveIndex = {
+    stage: Math.max(0, stateRef.moveOptions.stage.indexOf(stateRef.moveDraft.stage)),
+    status: Math.max(0, stateRef.moveOptions.status.indexOf(stateRef.moveDraft.status)),
+    assignee: Math.max(0, stateRef.moveOptions.assignee.indexOf(stateRef.moveDraft.assignee)),
+  };
+  for (const field of ['stage', 'status', 'assignee']) {
+    if (!stateRef.moveOptions[field][stateRef.moveIndex[field]] && stateRef.moveOptions[field].length > 0) {
+      stateRef.moveIndex[field] = 0;
+    }
+    if (stateRef.moveOptions[field].length > 0) {
+      stateRef.moveDraft[field] = stateRef.moveOptions[field][stateRef.moveIndex[field]];
+    }
+  }
+}
+
+function uniqSorted(values) {
+  return [...new Set(values.filter(Boolean).map((v) => String(v)))].sort((a, b) => a.localeCompare(b));
+}
+
+function uniqInOrder(values) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of values) {
+    if (raw === undefined || raw === null || raw === '') continue;
+    const v = String(raw);
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  return out;
+}
+
+function readAgentNames(projectDir) {
+  const agentsDir = path.join(projectDir, 'agents');
+  try {
+    return fs.readdirSync(agentsDir)
+      .filter((f) => /\.ya?ml$/i.test(f))
+      .map((f) => f.replace(/\.ya?ml$/i, ''))
+      .filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+function readSchemaEnum(projectDir, propertyName) {
+  const schemaPath = path.join(projectDir, 'task.schema.yml');
+  try {
+    const schema = loadYaml(schemaPath);
+    const values = schema
+      && schema.properties
+      && schema.properties[propertyName]
+      && Array.isArray(schema.properties[propertyName].enum)
+      ? schema.properties[propertyName].enum
+      : [];
+    return uniqInOrder(values);
+  } catch (_) {
+    return [];
+  }
+}
+
+function buildMoveOptions(stateRef) {
+  const schemaStages = readSchemaEnum(stateRef.projectDir, 'stage');
+  const schemaStatuses = readSchemaEnum(stateRef.projectDir, 'status');
+  const boardStages = uniqInOrder(
+    stateRef.board.columns.flatMap((col) => (Array.isArray(col.stages) ? col.stages : []))
+  );
+  const taskStages = uniqInOrder(stateRef.board.tasks.map((t) => t.stage));
+  const taskStatuses = uniqInOrder(stateRef.board.tasks.map((t) => t.status));
+  const taskAssignees = uniqInOrder(stateRef.board.tasks.map((t) => t.assignee));
+  const agentsFromDir = uniqInOrder(readAgentNames(stateRef.projectDir));
+  const assignees = uniqInOrder(['-', ...agentsFromDir, ...taskAssignees]);
+  return {
+    stage: uniqInOrder([...schemaStages, ...boardStages, ...taskStages]),
+    status: (() => {
+      const values = uniqInOrder([...schemaStatuses, ...taskStatuses]);
+      return values.length > 0 ? values : ['todo', 'in_progress', 'blocked', 'review', 'done'];
+    })(),
+    assignee: assignees.length > 0 ? assignees : ['-', 'bsa', 'coder', 'qa'],
+  };
+}
+
+function handleMoveInput(stateRef, key) {
+  if (key === '\u001b') {
+    stateRef.mode = 'normal';
+    setMessage(stateRef, 'Move canceled');
+    return;
+  }
+  if (key === '\u001b[A') {
+    stateRef.moveField = stateRef.moveField === 'stage' ? 'assignee' : stateRef.moveField === 'status' ? 'stage' : 'status';
+    return;
+  }
+  if (key === '\u001b[B') {
+    stateRef.moveField = stateRef.moveField === 'stage' ? 'status' : stateRef.moveField === 'status' ? 'assignee' : 'stage';
+    return;
+  }
+  if (key === '\u001b[D') {
+    const f = stateRef.moveField;
+    const opts = stateRef.moveOptions[f] || [];
+    if (opts.length === 0) return;
+    const delta = -1;
+    const next = (stateRef.moveIndex[f] + delta + opts.length) % opts.length;
+    stateRef.moveIndex[f] = next;
+    stateRef.moveDraft[f] = opts[next];
+    return;
+  }
+  if (key === '\u001b[C') {
+    const f = stateRef.moveField;
+    const opts = stateRef.moveOptions[f] || [];
+    if (opts.length === 0) return;
+    const delta = 1;
+    const next = (stateRef.moveIndex[f] + delta + opts.length) % opts.length;
+    stateRef.moveIndex[f] = next;
+    stateRef.moveDraft[f] = opts[next];
+    return;
+  }
+  if (key === '\r') {
+    const task = selectedTask(stateRef);
+    if (!task) {
+      stateRef.mode = 'normal';
+      return;
+    }
+    updateTaskFile(task, stateRef.moveDraft);
+    stateRef.mode = 'normal';
+    setMessage(stateRef, `Task ${task.file} updated`);
+    refreshBoard(stateRef);
+    return;
+  }
+}
+
+function handleAddInput(stateRef, key) {
+  if (key === '\u001b') {
+    stateRef.mode = 'normal';
+    setMessage(stateRef, 'Add canceled');
+    return;
+  }
+  if (key === '\r') {
+    const title = stateRef.addBuffer.trim();
+    if (!title) {
+      stateRef.mode = 'normal';
+      setMessage(stateRef, 'Empty title, canceled');
+      return;
+    }
+    const fileName = addTask(stateRef.projectDir, title);
+    stateRef.mode = 'normal';
+    stateRef.addBuffer = '';
+    setMessage(stateRef, `Task added: ${fileName}`);
+    refreshBoard(stateRef);
+    return;
+  }
+  if (key === '\u007f') {
+    stateRef.addBuffer = stateRef.addBuffer.slice(0, -1);
+    return;
+  }
+  if (key >= ' ' && key <= '~') stateRef.addBuffer += key;
+}
+
+function startDetails(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  stateRef.mode = 'details';
+  stateRef.detailsScroll = 0;
+}
+
+function handleCommentInput(stateRef, key) {
+  if (key === '\u001b') {
+    stateRef.mode = 'details';
+    setMessage(stateRef, 'Comment canceled');
+    return;
+  }
+  if (key === '\r') {
+    const task = selectedTask(stateRef);
+    const text = stateRef.commentBuffer.trim();
+    stateRef.commentBuffer = '';
+    if (!task || !text) {
+      stateRef.mode = 'details';
+      setMessage(stateRef, 'Empty comment, canceled');
+      return;
+    }
+    addTaskComment(task, text);
+    refreshBoard(stateRef);
+    stateRef.mode = 'details';
+    setMessage(stateRef, 'Comment added');
+    return;
+  }
+  if (key === '\u007f') {
+    stateRef.commentBuffer = stateRef.commentBuffer.slice(0, -1);
+    return;
+  }
+  if (key >= ' ' && key <= '~') stateRef.commentBuffer += key;
+}
+
+function scrollDetails(stateRef, delta) {
+  const task = selectedTask(stateRef);
+  if (!task) return;
+  const detailsLines = formatYaml(task.data).split('\n').length;
+  const bodyHeight = Math.max(5, (process.stdout.rows || 40) - 6);
+  const maxOffset = Math.max(0, detailsLines - bodyHeight);
+  stateRef.detailsScroll = Math.max(0, Math.min(maxOffset, stateRef.detailsScroll + delta));
+}
+
+function parseMouseWheelDelta(key) {
+  if (typeof key !== 'string') return 0;
+  const up = /\x1b\[<64;\d+;\d+[mM]/.test(key);
+  const down = /\x1b\[<65;\d+;\d+[mM]/.test(key);
+  if (up) return -3;
+  if (down) return 3;
+  return 0;
+}
+
+function main() {
+  const projectDir = path.resolve(__dirname, '..');
+  const stateRef = {
+    projectDir,
+    board: loadBoard(projectDir),
+    selectedCol: 0,
+    selectedTask: 0,
+    mode: 'normal',
+    moveField: 'stage',
+    moveDraft: { stage: '', status: '', assignee: '' },
+    moveOptions: { stage: [], status: [], assignee: [] },
+    moveIndex: { stage: 0, status: 0, assignee: 0 },
+    addBuffer: '',
+    commentBuffer: '',
+    detailsScroll: 0,
+    message: '',
+    messageAt: 0,
+  };
+  normalizeSelection(stateRef);
+  redraw(stateRef);
+
+  let lastSnapshot = snapshotInputs(projectDir);
+  const timer = setInterval(() => {
+    if (stateRef.message && stateRef.messageAt && Date.now() - stateRef.messageAt >= 5000) {
+      stateRef.message = '';
+      stateRef.messageAt = 0;
+      redraw(stateRef);
+    }
+
+    const current = snapshotInputs(projectDir);
+    if (current === lastSnapshot) return;
+    lastSnapshot = current;
+    try {
+      refreshBoard(stateRef);
+      if ((stateRef.mode === 'details' || stateRef.mode === 'comment') && !selectedTask(stateRef)) {
+        stateRef.mode = 'normal';
+        setMessage(stateRef, 'Task no longer exists');
+      }
+      redraw(stateRef);
+    } catch (err) {
+      setMessage(stateRef, err.message);
+      redraw(stateRef);
+    }
+  }, 300);
+
+  if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
+    clearInterval(timer);
+    process.stdout.write('Interactive TUI requires a TTY terminal.\n');
+    process.exit(1);
+  }
+
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding('utf8');
+
+  const shutdown = () => {
+    clearInterval(timer);
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+    process.stdout.write('\n');
+    process.exit(0);
+  };
+
+  process.stdin.on('data', (key) => {
+    if (key === '\u0003') {
+      shutdown();
+      return;
+    }
+
+    const wheelDelta = parseMouseWheelDelta(key);
+    if ((stateRef.mode === 'details' || stateRef.mode === 'comment') && wheelDelta !== 0) {
+      scrollDetails(stateRef, wheelDelta);
+      redraw(stateRef);
+      return;
+    }
+
+    if (stateRef.mode === 'move') {
+      handleMoveInput(stateRef, key);
+      redraw(stateRef);
+      return;
+    }
+
+    if (stateRef.mode === 'comment') {
+      handleCommentInput(stateRef, key);
+      redraw(stateRef);
+      return;
+    }
+
+    if (stateRef.mode === 'add') {
+      handleAddInput(stateRef, key);
+      redraw(stateRef);
+      return;
+    }
+
+    if (stateRef.mode === 'details') {
+      if (key === '\u001b') {
+        stateRef.mode = 'normal';
+      } else if (key === '\u001b[A') {
+        scrollDetails(stateRef, -1);
+      } else if (key === '\u001b[B') {
+        scrollDetails(stateRef, 1);
+      } else if (key === 'c') {
+        stateRef.mode = 'comment';
+        stateRef.commentBuffer = '';
+      } else if (key === 'a') {
+        stateRef.mode = 'add';
+        stateRef.addBuffer = '';
+      } else if (key === 'm') {
+        startMovePopup(stateRef);
+      } else if (key === 'x') {
+        const task = selectedTask(stateRef);
+        if (task) {
+          archiveTask(task, projectDir);
+          refreshBoard(stateRef);
+          stateRef.mode = 'normal';
+          setMessage(stateRef, `Task archived: ${task.file}`);
+        } else {
+          setMessage(stateRef, 'No task selected');
+        }
+      }
+      redraw(stateRef);
+      return;
+    }
+
+    if (key === '\u001b[A') moveSelection(stateRef, 0, -1);
+    else if (key === '\u001b[B') moveSelection(stateRef, 0, 1);
+    else if (key === '\u001b[C') moveSelection(stateRef, 1, 0);
+    else if (key === '\u001b[D') moveSelection(stateRef, -1, 0);
+    else if (key === 'a') {
+      stateRef.mode = 'add';
+      stateRef.addBuffer = '';
+    } else if (key === 'm') {
+      startMovePopup(stateRef);
+    } else if (key === 'x') {
+      const task = selectedTask(stateRef);
+      if (task) {
+        archiveTask(task, projectDir);
+        setMessage(stateRef, `Task archived: ${task.file}`);
+        refreshBoard(stateRef);
+      } else {
+        setMessage(stateRef, 'No task selected');
+      }
+    } else if (key === '\r') {
+      startDetails(stateRef);
+    }
+
+    redraw(stateRef);
+  });
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}
+
+main();

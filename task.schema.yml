@@ -1,0 +1,127 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://example.com/schemas/task.schema.yml"
+title: "Task"
+description: "Schema for a single task file in a tracker-like YAML format"
+type: object
+additionalProperties: false
+required:
+  - id
+  - title
+  - created_at
+properties:
+  id:
+    type: string
+    minLength: 1
+    pattern: "^[a-z0-9][a-z0-9-]*$"
+    description: "Unique task identifier, e.g. 10-defaults-check"
+    
+  title:
+    type: string
+    minLength: 1
+    maxLength: 200
+
+  description:
+    type: string
+
+  type:
+    type: string
+    enum: [task, bug, feature, epic]
+    default: task
+
+  stage:
+    type: string
+    default: backlog
+    enum:
+      - backlog
+      - refinement
+      - coding
+      - code-review
+      - acceptance_testing
+      - regression_testing
+      - review
+      - done
+
+  status:
+    type: string
+    default: todo
+    enum:
+      - todo
+      - in_progress
+      - blocked
+      - review
+      - done
+
+  priority:
+    type: string
+    default: medium
+    enum: [low, medium, high, critical]
+
+  assignee:
+    type: string
+    minLength: 1
+
+  reporter:
+    type: string
+    minLength: 1
+
+  labels:
+    type: array
+    items:
+      type: string
+      minLength: 1
+    uniqueItems: true
+
+  workspace_dir:
+    type: string
+    minLength: 1
+    description: "Local workspace directory for the task"
+    default: "/Users/user/Documents/projects/code-conveyor/demo-workspace"
+
+  created_at:
+    type: string
+    format: date-time
+
+  updated_at:
+    type: string
+    format: date-time
+
+  due_date:
+    type: string
+    format: date
+
+  estimate_hours:
+    type: number
+    minimum: 0
+
+  spent_hours:
+    type: number
+    minimum: 0
+
+  comments:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [author, text, created_at]
+      properties:
+        author:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+
+  subtasks:
+    type: array
+    items:
+      type: string
+      pattern: "^[a-z0-9][a-z0-9-]*$"
+
+  related_tasks:
+    type: array
+    items:
+      type: string
+      pattern: "^[a-z0-9][a-z0-9-]*$"

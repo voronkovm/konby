@@ -1,0 +1,1 @@
+コンベヤ [konbeya], or konby for short, meaning "conveyer".

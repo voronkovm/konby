@@ -1,0 +1,592 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawnSync } = require('child_process');
+
+function parseScalar(value) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (value === 'null') return null;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  if (value === '-') return '-';
+  if (value === '"*"') return '*';
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseYamlSimple(input) {
+  const root = {};
+  const stack = [{ indent: -1, kind: 'object', value: root }];
+  const lines = input.replace(/\t/g, '  ').split(/\r?\n/);
+
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const raw = lines[idx];
+    if (!raw.trim() || raw.trim().startsWith('#')) continue;
+
+    const indent = raw.match(/^\s*/)[0].length;
+    const line = raw.trim();
+
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+    const parent = stack[stack.length - 1];
+
+    if (line.startsWith('- ')) {
+      if (parent.kind !== 'array') throw new Error(`Invalid YAML list item at line ${idx + 1}`);
+      const content = line.slice(2).trim();
+      if (!content) {
+        const node = {};
+        parent.value.push(node);
+        stack.push({ indent, kind: 'object', value: node });
+        continue;
+      }
+      const keyMatch = content.match(/^([^:]+):(.*)$/);
+      if (keyMatch) {
+        const key = keyMatch[1].trim();
+        const rawValue = keyMatch[2].trim();
+        const node = {};
+        node[key] = rawValue ? parseScalar(rawValue) : {};
+        parent.value.push(node);
+        if (!rawValue) {
+          stack.push({ indent, kind: 'object', value: node[key] });
+        } else {
+          stack.push({ indent, kind: 'object', value: node });
+        }
+        continue;
+      }
+      parent.value.push(parseScalar(content));
+      continue;
+    }
+
+    if (parent.kind !== 'object') throw new Error(`Invalid YAML map entry at line ${idx + 1}`);
+
+    const match = line.match(/^([^:]+):(.*)$/);
+    if (!match) throw new Error(`Cannot parse YAML line ${idx + 1}: ${line}`);
+
+    const key = match[1].trim();
+    const rawValue = match[2].trim();
+
+    if (!rawValue) {
+      const nextLine = lines.slice(idx + 1).find((l) => l.trim() && !l.trim().startsWith('#'));
+      const nextTrim = nextLine ? nextLine.trim() : '';
+      const isArray = nextTrim.startsWith('- ');
+      if (isArray) {
+        const arr = [];
+        parent.value[key] = arr;
+        stack.push({ indent, kind: 'array', value: arr });
+      } else {
+        const obj = {};
+        parent.value[key] = obj;
+        stack.push({ indent, kind: 'object', value: obj });
+      }
+      continue;
+    }
+
+    parent.value[key] = parseScalar(rawValue);
+  }
+
+  return root;
+}
+
+function yamlScalar(v) {
+  if (v === null) return 'null';
+  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+  if (typeof v === 'string' && /^[A-Za-z0-9_./:*+-]+$/.test(v)) return v;
+  return JSON.stringify(v);
+}
+
+function formatYaml(value, indent = 0) {
+  const sp = ' '.repeat(indent);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `${sp}[]`;
+    return value
+      .map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return `${sp}- ${yamlScalar(item)}`;
+        const nested = formatYaml(item, indent + 2).split('\n');
+        return `${sp}- ${nested[0].trimStart()}\n${nested.slice(1).join('\n')}`;
+      })
+      .join('\n');
+  }
+
+  const lines = [];
+  for (const [k, v] of Object.entries(value)) {
+    if (Array.isArray(v)) {
+      if (v.length === 0) lines.push(`${sp}${k}: []`);
+      else lines.push(`${sp}${k}:\n${formatYaml(v, indent + 2)}`);
+      continue;
+    }
+    if (v && typeof v === 'object') {
+      lines.push(`${sp}${k}:\n${formatYaml(v, indent + 2)}`);
+      continue;
+    }
+    lines.push(`${sp}${k}: ${yamlScalar(v)}`);
+  }
+  return lines.join('\n');
+}
+
+function loadYaml(filePath) {
+  return parseYamlSimple(fs.readFileSync(filePath, 'utf8'));
+}
+
+function saveYaml(filePath, obj) {
+  fs.writeFileSync(filePath, `${formatYaml(obj)}\n`, 'utf8');
+}
+
+function stageAliases(stage) {
+  if (stage === 'code-reivew') return ['code-reivew', 'code-review'];
+  if (stage === 'code-review') return ['code-review', 'code-reivew'];
+  return [stage];
+}
+
+function buildStageToColumn(columns) {
+  const map = new Map();
+  for (const col of columns) {
+    for (const stage of col.stages || []) {
+      for (const alias of stageAliases(stage)) {
+        map.set(alias, col.name);
+      }
+    }
+  }
+  return map;
+}
+
+function countByColumn(tasks, stageToColumn) {
+  const counts = new Map();
+  for (const t of tasks) {
+    const col = stageToColumn.get(t.data.stage);
+    if (!col) continue;
+    counts.set(col, (counts.get(col) || 0) + 1);
+  }
+  return counts;
+}
+
+function canEnterColumn(column, columnsByName, counts) {
+  const def = columnsByName.get(column);
+  if (!def) return true;
+  if (def.wip_limit === '-' || def.wip_limit === undefined) return true;
+  const limit = Number(def.wip_limit);
+  if (!Number.isFinite(limit)) return true;
+  return (counts.get(column) || 0) < limit;
+}
+
+function ruleMatches(task, rule) {
+  if (!(rule.stage === '*' || task.stage === rule.stage)) return false;
+  if (!(rule.status === '*' || task.status === rule.status)) return false;
+  if (rule.assignee === '*' || rule.assignee === undefined) return true;
+  return task.assignee === rule.assignee;
+}
+
+function applyRule(task, rule) {
+  if (rule.set_stage) task.stage = rule.set_stage;
+  if (rule.set_status) task.status = rule.set_status;
+  if (rule.set_assignee) task.assignee = rule.set_assignee;
+  task.updated_at = new Date().toISOString();
+}
+
+function runAgent(projectDir, agent, taskPath) {
+  const cmd = path.join(projectDir, 'bin', 'new_session');
+  const out = spawnSync(cmd, ['--agent', agent, '--task', taskPath], {
+    cwd: projectDir,
+    encoding: 'utf8',
+  });
+  return out;
+}
+
+function readScalarFromYaml(key, file) {
+  try {
+    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+    for (const raw of lines) {
+      const match = raw.match(new RegExp(`^\\s*${key}:\\s*(.*)\\s*$`));
+      if (!match) continue;
+      let value = match[1].trim();
+      if (!value || value === '|') return '';
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      return value;
+    }
+    return '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+function sessionIdForTask(taskFile, task, agent) {
+  const stage = task.stage || 'backlog';
+  const taskBase = path.basename(taskFile);
+  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
+  return `${agent}__${stage}___${taskSlug}`;
+}
+
+function captureTmux(sessionId, tailLines = 50) {
+  const out = spawnSync('tmux', ['capture-pane', '-J', '-t', sessionId, '-p', '-S', '-', '-E', '-'], {
+    encoding: 'utf8',
+  });
+  if (out.status !== 0) return { ok: false, full: '', tail: '', error: `${out.stderr || out.stdout || 'tmux capture failed'}`.trim() };
+  const all = (out.stdout || '').split(/\r?\n/);
+  const full = all.join('\n').trimEnd();
+  const tail = all.slice(-tailLines).join('\n').trimEnd();
+  if (!full) return { ok: false, full: '', tail: '', error: 'empty terminal output' };
+  return { ok: true, full, tail, error: '' };
+}
+
+function ensureDir(p) {
+  fs.mkdirSync(p, { recursive: true });
+}
+
+function transcriptFileForSession(projectDir, sessionId) {
+  const transcriptsDir = path.join(projectDir, 'transcripts');
+  ensureDir(transcriptsDir);
+  return path.join(transcriptsDir, sessionId);
+}
+
+function writeTranscript(projectDir, sessionId, text) {
+  const file = transcriptFileForSession(projectDir, sessionId);
+  fs.writeFileSync(file, text.endsWith('\n') ? text : `${text}\n`, 'utf8');
+  return file;
+}
+
+function addSuccessComment(task, agent, transcriptRelPath, atIso) {
+  if (!Array.isArray(task.comments)) task.comments = [];
+  task.comments.push({
+    author: agent,
+    text: `success_update: agent=${agent}; at=${atIso}; transcript=${transcriptRelPath}`,
+    created_at: atIso,
+  });
+}
+
+function detectDispatchResultMarker(text) {
+  const out = spawnSync(
+    'grep',
+    ['-Eim1', '^\\s*DISPATCH_RESULT\\s*:\\s*(success|failure|nochange)\\s*$'],
+    { input: String(text || ''), encoding: 'utf8' },
+  );
+  if (out.status !== 0) return '';
+  const line = String(out.stdout || '').split(/\r?\n/).find((x) => x.trim());
+  if (!line) return '';
+  const m = line.match(/:\s*(success|failure|nochange)\s*$/i);
+  return m ? m[1].toLowerCase() : '';
+}
+
+function loadEnvFile(envPath) {
+  if (!fs.existsSync(envPath)) return;
+  const txt = fs.readFileSync(envPath, 'utf8');
+  for (const line of txt.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let val = trimmed.slice(idx + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = val;
+  }
+}
+
+async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, task }) {
+  const url = `${baseUrl.replace(/\/$/, '')}${endpoint}`;
+  const payload = {
+    model,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are a strict task-state classifier.',
+          'Return JSON only: {"outcome":"success|failure|nochange"}.',
+          'success means the assignee clearly completed the current stage deliverable.',
+          'failure means explicit blocker or unrecoverable error.',
+          'nochange means ongoing or ambiguous state.',
+          'If signals conflict, return failure.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          '<terminal_output>',
+          terminalText,
+          '</terminal_output>',
+          'Classify current outcome as one of: success|failure|nochange.',
+        ].join('\n\n'),
+      },
+    ],
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OpenAI request failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+  }
+
+  const json = await res.json();
+  const content = (((json || {}).choices || [])[0] || {}).message?.content;
+  let raw = '';
+  if (Array.isArray(content)) {
+    raw = content.map((p) => (p && typeof p.text === 'string' ? p.text : '')).join('').trim();
+  } else {
+    raw = String(content || '').trim();
+  }
+  let normalized = '';
+  try {
+    const parsed = JSON.parse(raw);
+    normalized = String((parsed || {}).outcome || '').trim().toLowerCase();
+  } catch (_e) {
+    normalized = '';
+  }
+  if (normalized === 'success' || normalized === 'failure' || normalized === 'nochange') return normalized;
+  if (raw.toLowerCase().includes('success')) return 'success';
+  if (raw.toLowerCase().includes('failure')) return 'failure';
+  return 'nochange';
+}
+
+async function evaluateNonNewTasks(projectDir, tasks) {
+  const cacheDir = path.join(os.tmpdir(), 'code-conveyor-dispatch-cache');
+  ensureDir(cacheDir);
+  loadEnvFile(path.join(projectDir, '.env'));
+
+  const model = process.env.OPENAI_MODEL || 'gpt-5.4-mini';
+  const apiKey = process.env.OPENAI_API_KEY || '';
+  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+  const endpoint = process.env.OPENAI_API_ENDPOINT || '/chat/completions';
+
+  const updates = [];
+
+  for (const item of tasks) {
+    if (item.data.status === 'todo') continue;
+    const agent = item.data.assignee;
+    if (!agent || agent === '*') continue;
+
+    const agentFile = path.join(projectDir, 'agents', `${agent}.yml`);
+    const successStatus = readScalarFromYaml('success_status', agentFile);
+    const inprogressStatus = readScalarFromYaml('inprogress_status', agentFile) || 'in_progress';
+    const failureStatus = readScalarFromYaml('failure_status', agentFile) || 'failure';
+
+    if (!fs.existsSync(agentFile) || !successStatus) continue;
+    const normalizedStatus = String(item.data.status || '').trim().toLowerCase();
+    const normalizedSuccessStatus = String(successStatus || '').trim().toLowerCase();
+    const normalizedFailureStatus = String(failureStatus || '').trim().toLowerCase();
+    if (normalizedStatus === normalizedSuccessStatus || normalizedStatus === normalizedFailureStatus) {
+      continue;
+    }
+
+    const sessionId = sessionIdForTask(item.file, item.data, agent);
+    const cap = captureTmux(sessionId, 50);
+    if (!cap.ok) {
+      if (item.data.status !== failureStatus) {
+        item.data.status = failureStatus;
+        item.data.updated_at = new Date().toISOString();
+        saveYaml(item.file, item.data);
+      }
+      updates.push({ file: path.basename(item.file), result: 'failure', reason: `tmux_unavailable:${cap.error}` });
+      continue;
+    }
+    const transcriptAbsPath = writeTranscript(projectDir, sessionId, cap.full);
+    const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || `transcripts/${sessionId}`;
+    const markerOutcome = detectDispatchResultMarker(cap.full);
+    if (markerOutcome === 'success' && item.data.status !== successStatus) {
+      const nowIso = new Date().toISOString();
+      item.data.status = successStatus;
+      item.data.updated_at = nowIso;
+      addSuccessComment(item.data, agent, transcriptRelPath, nowIso);
+      saveYaml(item.file, item.data);
+      updates.push({ file: path.basename(item.file), result: 'success', reason: 'dispatch_marker' });
+      continue;
+    }
+    if (markerOutcome === 'failure' && item.data.status !== failureStatus) {
+      item.data.status = failureStatus;
+      item.data.updated_at = new Date().toISOString();
+      saveYaml(item.file, item.data);
+      updates.push({ file: path.basename(item.file), result: 'failure', reason: 'dispatch_marker' });
+      continue;
+    }
+
+    const cacheFile = path.join(cacheDir, `${sessionId.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`);
+    let prev = null;
+    if (fs.existsSync(cacheFile)) prev = fs.readFileSync(cacheFile, 'utf8');
+    fs.writeFileSync(cacheFile, cap.tail, 'utf8');
+
+    if (prev === null || prev !== cap.tail) {
+      if (item.data.status !== inprogressStatus) {
+        item.data.status = inprogressStatus;
+        item.data.updated_at = new Date().toISOString();
+        saveYaml(item.file, item.data);
+      }
+      updates.push({ file: path.basename(item.file), result: 'nochange', reason: 'terminal_changed' });
+      continue;
+    }
+
+    if (!apiKey) {
+      updates.push({ file: path.basename(item.file), result: 'nochange', reason: 'missing_openai_api_key' });
+      continue;
+    }
+
+    let outcome = 'nochange';
+    try {
+      outcome = await llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText: cap.tail, task: item.data });
+    } catch (e) {
+      outcome = 'failure';
+      updates.push({ file: path.basename(item.file), result: 'failure', reason: `llm_error:${String(e.message || e)}` });
+    }
+
+    if (outcome === 'success' && item.data.status !== successStatus) {
+      const nowIso = new Date().toISOString();
+      item.data.status = successStatus;
+      item.data.updated_at = nowIso;
+      addSuccessComment(item.data, agent, transcriptRelPath, nowIso);
+      saveYaml(item.file, item.data);
+    } else if (outcome === 'failure' && item.data.status !== failureStatus) {
+      item.data.status = failureStatus;
+      item.data.updated_at = new Date().toISOString();
+      saveYaml(item.file, item.data);
+    }
+
+    if (!updates.find((u) => u.file === path.basename(item.file) && u.result === 'failure')) {
+      updates.push({ file: path.basename(item.file), result: outcome, reason: 'llm' });
+    }
+  }
+
+  return updates;
+}
+
+function acquireLock() {
+  const lockDir = path.join(os.tmpdir(), 'code-conveyor-dispatch.lock');
+  const ownerFile = path.join(lockDir, 'owner.json');
+
+  function isPidRunning(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  try {
+    fs.mkdirSync(lockDir);
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    try {
+      const owner = JSON.parse(fs.readFileSync(ownerFile, 'utf8'));
+      if (owner && Number.isInteger(owner.pid) && isPidRunning(owner.pid)) {
+        return null;
+      }
+    } catch (_e) {
+      // ignore malformed owner file
+    }
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    fs.mkdirSync(lockDir);
+  }
+
+  fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+  return () => fs.rmSync(lockDir, { recursive: true, force: true });
+}
+
+async function main() {
+  const releaseLock = acquireLock();
+  if (!releaseLock) {
+    console.log('Skipped: bin/dispatch is already running');
+    return;
+  }
+
+  try {
+    const projectDir = path.resolve(__dirname, '..');
+    const dispatchPath = path.join(projectDir, 'dispatch.yml');
+    const tasksDir = path.join(projectDir, 'tasks');
+
+    if (!fs.existsSync(dispatchPath)) throw new Error(`dispatch.yml not found: ${dispatchPath}`);
+    if (!fs.existsSync(tasksDir)) throw new Error(`tasks dir not found: ${tasksDir}`);
+
+    const dispatch = loadYaml(dispatchPath);
+    const columns = (dispatch.board && dispatch.board.columns) || [];
+    const rules = dispatch.rules || [];
+    const columnsByName = new Map(columns.map((c) => [c.name, c]));
+    const stageToColumn = buildStageToColumn(columns);
+
+    const taskFiles = fs.readdirSync(tasksDir)
+      .filter((f) => /\.ya?ml$/i.test(f))
+      .sort();
+
+    const tasks = taskFiles.map((file) => {
+      const full = path.join(tasksDir, file);
+      return { file: full, data: loadYaml(full) };
+    });
+
+    const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks);
+
+    const counts = countByColumn(tasks, stageToColumn);
+    const moved = [];
+    const skipped = [];
+    const launched = [];
+
+    for (const rule of rules) {
+      for (const item of tasks) {
+        if (!ruleMatches(item.data, rule)) continue;
+        const fromColumn = stageToColumn.get(item.data.stage);
+        const toStage = rule.set_stage || item.data.stage;
+        const toColumn = stageToColumn.get(toStage);
+
+        if (toColumn && !canEnterColumn(toColumn, columnsByName, counts)) {
+          skipped.push({ file: path.basename(item.file), reason: `WIP limit reached in column ${toColumn}` });
+          continue;
+        }
+
+        applyRule(item.data, rule);
+        saveYaml(item.file, item.data);
+        moved.push(path.basename(item.file));
+
+        if (fromColumn) counts.set(fromColumn, Math.max(0, (counts.get(fromColumn) || 0) - 1));
+        if (toColumn) counts.set(toColumn, (counts.get(toColumn) || 0) + 1);
+
+        if (rule.set_assignee) {
+          const result = runAgent(projectDir, rule.set_assignee, item.file);
+          launched.push({
+            file: path.basename(item.file),
+            agent: rule.set_assignee,
+            ok: result.status === 0,
+            output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
+          });
+        }
+      }
+    }
+
+    console.log(`Moved: ${moved.length}`);
+    for (const file of moved) console.log(`- ${file}`);
+    if (taskStatusChecks.length > 0) {
+      console.log(`Task status checks: ${taskStatusChecks.length}`);
+      for (const s of taskStatusChecks) {
+        console.log(`- ${s.file}: ${s.result} (${s.reason})`);
+      }
+    }
+    if (skipped.length > 0) {
+      console.log(`Skipped: ${skipped.length}`);
+      for (const s of skipped) console.log(`- ${s.file}: ${s.reason}`);
+    }
+    if (launched.length > 0) {
+      console.log(`Launched: ${launched.length}`);
+      for (const l of launched) {
+        console.log(`- ${l.file}: agent=${l.agent}, ok=${l.ok}`);
+        if (!l.ok && l.output) console.log(`  ${l.output.replace(/\n/g, '\n  ')}`);
+      }
+    }
+  } finally {
+    releaseLock();
+  }
+}
+
+main().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});

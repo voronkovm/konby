@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  bin/new_session --agent <agent-slug> --task <task-file>
+
+Example:
+  bin/new_session --agent coder --task tasks/task.yml
+USAGE
+}
+
+err() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+agent_slug=""
+task_file=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent)
+      [[ $# -ge 2 ]] || err "--agent requires a value"
+      agent_slug="$2"
+      shift 2
+      ;;
+    --task)
+      [[ $# -ge 2 ]] || err "--task requires a value"
+      task_file="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      err "Unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$agent_slug" ]] || err "--agent is required"
+[[ -n "$task_file" ]] || err "--task is required"
+
+[[ -f "$task_file" ]] || err "Task file not found: $task_file"
+agent_file="agents/${agent_slug}.yml"
+[[ -f "$agent_file" ]] || err "Agent file not found: $agent_file"
+command -v tmux >/dev/null 2>&1 || err "tmux is not installed"
+
+# Reads a block scalar, e.g. role: |
+read_block_scalar() {
+  local key="$1"
+  local file="$2"
+  awk -v key="$key" '
+    BEGIN { in_block=0; base_indent=-1 }
+    {
+      if (in_block == 0) {
+        if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*\\|") {
+          in_block=1
+          next
+        }
+      } else {
+        if ($0 ~ /^[[:space:]]*$/) {
+          print ""
+          next
+        }
+
+        match($0, /^[[:space:]]*/)
+        indent = RLENGTH
+
+        if (base_indent < 0) {
+          base_indent = indent
+        }
+
+        if (indent < base_indent) {
+          exit
+        }
+
+        line = substr($0, base_indent + 1)
+        print line
+      }
+    }
+  ' "$file"
+}
+
+read_scalar() {
+  local key="$1"
+  local file="$2"
+  awk -v key="$key" '
+    {
+      if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
+        sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
+        gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
+        print $0
+        exit
+      }
+    }
+  ' "$file"
+}
+
+role_text="$(read_block_scalar role "$agent_file")"
+[[ -n "$role_text" ]] || err "Could not read role block from $agent_file"
+
+cli_cmd="$(read_scalar cli "$agent_file")"
+[[ -n "$cli_cmd" ]] || err "Could not read cli from $agent_file"
+
+stage="$(read_scalar stage "$task_file")"
+if [[ -z "$stage" ]]; then
+  stage="backlog"
+fi
+
+workspace_dir="$(read_scalar workspace_dir "$task_file")"
+if [[ -z "$workspace_dir" ]]; then
+  workspace_dir="$(pwd)"
+fi
+[[ -d "$workspace_dir" ]] || err "workspace_dir does not exist or is not a directory: $workspace_dir"
+
+task_base="$(basename "$task_file")"
+task_slug="$task_base"
+task_slug="${task_slug%.yml}"
+task_slug="${task_slug%.yaml}"
+
+session_id="${agent_slug}__${stage}___${task_slug}"
+pane_target="${session_id}:0.0"
+
+if tmux has-session -t "$session_id" 2>/dev/null; then
+  err "tmux session already exists: $session_id"
+fi
+
+task_text="$(cat "$task_file")"
+prompt="${role_text}
+
+Do the following task consiering comments and updates:
+${task_text}
+
+Completion protocol:
+- If and only if your current stage work is fully completed successfully, include an exact standalone line:
+DISPATCH_RESULT: success
+- Do not print this marker if work is incomplete or blocked."
+
+tmux new-session -d -s "$session_id" -c "$workspace_dir"
+tmux set-option -t "$session_id" mouse on
+sleep 0.2
+
+# Send command literally, then explicit Enter (C-m) for better tmux compatibility.
+tmux send-keys -t "$pane_target" -l -- "$cli_cmd"
+tmux send-keys -t "$pane_target" C-m
+sleep 1
+
+if tmux capture-pane -t "$pane_target" -p -S -100 | grep -qi "Yes, I trust this folder"; then
+  tmux send-keys -t "$pane_target" -l -- "1"
+  tmux send-keys -t "$pane_target" C-m
+fi
+
+if tmux capture-pane -t "$pane_target" -p -S -100 | grep -qi "Do you trust the contents"; then
+  tmux send-keys -t "$pane_target" -l -- "1"
+  tmux send-keys -t "$pane_target" C-m
+fi
+
+sleep 1
+tmux set-buffer -- "$prompt"
+tmux paste-buffer -t "$pane_target"
+tmux send-keys -t "$pane_target" C-m
+sleep 1
+tmux send-keys -t "$pane_target" C-m
+
+echo "Started tmux session: $session_id"

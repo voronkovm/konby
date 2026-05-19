@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+log_file="${TMPDIR:-/tmp}/code-conveyor-dispatchd.log"
+
+nohup bash -c '
+  set -euo pipefail
+  root_dir="$1"
+  while true; do
+    "$root_dir/bin/dispatch" >> "$2" 2>&1 || true
+    sleep 5
+  done
+' _ "$root_dir" "$log_file" >/dev/null 2>&1 &
+
+echo "PID: $!"

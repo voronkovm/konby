@@ -1,0 +1,68 @@
+board:
+  columns:
+    - name: backlog
+      wip_limit: -
+      stages:
+        - backlog
+    - name: todo
+      wip_limit: 3
+      stages:
+        - refinement
+    - name: in_progress
+      wip_limit: 5
+      stages:
+        - coding
+        - code-review
+        - testing
+        - acceptance_testing
+        - regression_testing
+    - name: ready
+      wip_limit: 3
+      stages:
+        - in_review
+    - name: done
+      wip_limit: -
+      stages:
+        - done
+
+rules:
+  - stage: backlog
+    status: "*"
+    assignee: "*"
+    set_stage: refinement
+    set_status: in_progress
+    set_assignee: bsa
+  - stage: "*"
+    status: todo
+    assignee: "*"
+    set_stage: refinement
+    set_status: in_progress
+    set_assignee: bsa
+  - stage: refinement
+    status: done
+    assignee: "*"
+    set_stage: coding
+    set_status: in_progress
+    set_assignee: coder
+  - stage: coding
+    status: done
+    assignee: "*"
+    set_stage: code-review
+    set_status: in_progress
+    set_assignee: coder
+  - stage: code-review
+    status: done
+    assignee: "*"
+    set_stage: acceptance_testing
+    set_status: in_progress
+    set_assignee: qa
+  - stage: acceptance_testing
+    status: done
+    assignee: "*"
+    set_stage: regression_testing
+    set_status: in_progress
+    set_assignee: coder
+  - stage: regression_testing
+    status: done
+    assignee: "*"
+    set_stage: in_review
