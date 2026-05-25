@@ -414,19 +414,48 @@ function setMessage(stateRef, text) {
 function moveSelection(stateRef, dx, dy) {
   const cols = visibleColumns(stateRef.board);
   if (cols.length === 0) return;
-  stateRef.selectedCol = Math.max(0, Math.min(cols.length - 1, stateRef.selectedCol + dx));
+
+  if (dx !== 0) {
+    const step = dx > 0 ? 1 : -1;
+    let nextCol = stateRef.selectedCol + step;
+    let movedToNonEmpty = false;
+    while (nextCol >= 0 && nextCol < cols.length) {
+      const nextTasks = stateRef.board.tasksByColumn.get(cols[nextCol].name) || [];
+      if (nextTasks.length > 0) {
+        stateRef.selectedCol = nextCol;
+        movedToNonEmpty = true;
+        break;
+      }
+      nextCol += step;
+    }
+    if (!movedToNonEmpty) return;
+  } else {
+    stateRef.selectedCol = Math.max(0, Math.min(cols.length - 1, stateRef.selectedCol));
+  }
+
   const tasks = stateRef.board.tasksByColumn.get(cols[stateRef.selectedCol].name) || [];
   if (tasks.length === 0) stateRef.selectedTask = 0;
   else stateRef.selectedTask = Math.max(0, Math.min(tasks.length - 1, stateRef.selectedTask + dy));
 }
 
+function runScriptOrThrow(scriptName, args) {
+  const scriptPath = path.join(__dirname, scriptName);
+  const out = spawnSync(process.execPath, [scriptPath, ...args], {
+    encoding: 'utf8',
+    cwd: process.cwd(),
+  });
+  if (out.status !== 0) {
+    const detail = String(out.stderr || out.stdout || '').trim();
+    throw new Error(detail || `${scriptName} failed`);
+  }
+}
+
 function updateTaskFile(task, updates) {
-  const data = loadYaml(task.path);
-  if (updates.column !== undefined) data.column = updates.column;
-  if (updates.status !== undefined) data.status = updates.status;
-  if (updates.assignee !== undefined) data.assignee = updates.assignee;
-  data.updated_at = new Date().toISOString();
-  saveYaml(task.path, data);
+  const args = [task.path];
+  if (updates.column !== undefined) args.push('--column', String(updates.column));
+  if (updates.status !== undefined) args.push('--status', String(updates.status));
+  if (updates.assignee !== undefined) args.push('--assignee', String(updates.assignee));
+  runScriptOrThrow('task_move', args);
 }
 
 function archiveTask(task, projectDir) {
@@ -448,44 +477,8 @@ function addTaskComment(task, text) {
   saveYaml(task.path, data);
 }
 
-function nextTaskNumber(tasksDir) {
-  try {
-    const files = fs.readdirSync(tasksDir).filter((f) => /\.ya?ml$/i.test(f));
-    let max = 0;
-    for (const file of files) {
-      const m = file.match(/^(\d+)/);
-      if (!m) continue;
-      max = Math.max(max, Number(m[1]));
-    }
-    return max + 1;
-  } catch (_) {
-    return 1;
-  }
-}
-
-function slugify(input) {
-  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'task';
-}
-
 function addTask(projectDir, title) {
-  const tasksDir = path.join(projectDir, 'tasks');
-  fs.mkdirSync(tasksDir, { recursive: true });
-  const n = nextTaskNumber(tasksDir);
-  const fileName = `${n}-${slugify(title)}.yaml`;
-  const now = new Date().toISOString();
-  const data = {
-    title,
-    type: 'task',
-    column: 'backlog',
-    status: 'todo',
-    priority: 'medium',
-    created_at: now,
-    workspace_dir: path.join(projectDir, 'demo-workspace'),
-    assignee: 'bsa',
-    updated_at: now,
-  };
-  saveYaml(path.join(tasksDir, fileName), data);
-  return fileName;
+  runScriptOrThrow('task_add', ['--board', projectDir, '--title', title]);
 }
 
 function startMovePopup(stateRef) {
@@ -621,10 +614,15 @@ function handleMoveInput(stateRef, key) {
       stateRef.mode = 'normal';
       return;
     }
-    updateTaskFile(task, stateRef.moveDraft);
-    stateRef.mode = 'normal';
-    setMessage(stateRef, `Task ${task.file} updated`);
-    refreshBoard(stateRef);
+    try {
+      updateTaskFile(task, stateRef.moveDraft);
+      stateRef.mode = 'normal';
+      setMessage(stateRef, `Task ${task.file} updated`);
+      refreshBoard(stateRef);
+    } catch (err) {
+      stateRef.mode = 'normal';
+      setMessage(stateRef, `Move failed: ${err.message}`);
+    }
     return;
   }
 }
@@ -642,11 +640,17 @@ function handleAddInput(stateRef, key) {
       setMessage(stateRef, 'Empty title, canceled');
       return;
     }
-    const fileName = addTask(stateRef.projectDir, title);
-    stateRef.mode = 'normal';
-    stateRef.addBuffer = '';
-    setMessage(stateRef, `Task added: ${fileName}`);
-    refreshBoard(stateRef);
+    try {
+      addTask(stateRef.projectDir, title);
+      stateRef.mode = 'normal';
+      stateRef.addBuffer = '';
+      setMessage(stateRef, 'Task added');
+      refreshBoard(stateRef);
+    } catch (err) {
+      stateRef.mode = 'normal';
+      stateRef.addBuffer = '';
+      setMessage(stateRef, `Add failed: ${err.message}`);
+    }
     return;
   }
   if (key === '\u007f') {

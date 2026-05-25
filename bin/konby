@@ -26,7 +26,7 @@ Usage steps:
 
   3. Add a task to the board (stored in <path>/tasks/*.yml):
     `konby task add --title "..." [--board <path>]`
-    `konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]`
+    `konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--transcript <path>]`
     `konby task comment <task-file> "<comment>"`
 
   4. Run dispatcher continuously in background loop:
@@ -38,7 +38,7 @@ Usage steps:
 Additional commands:
   konby help
     This help message.
-  konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]
+  konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--transcript <path>]
     Move/update task fields and optionally append a comment.
   konby task comment <task-file> "<comment>"
     Append a comment to the task.

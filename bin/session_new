@@ -5,6 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   session_new --agent <agent-file> --task <task-file> [--board <path>]
+              [--transcript <path>] [--session-ts <UTC timestamp>]
               [--status-todo <status>] [--status-in-progress <status>]
               [--status-success <status>] [--status-failure <status>]
 
@@ -25,6 +26,8 @@ status_todo_arg=""
 status_in_progress_arg=""
 status_success_arg=""
 status_failure_arg=""
+transcript_path_arg=""
+session_ts_arg=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +64,16 @@ while [[ $# -gt 0 ]]; do
     --status-failure)
       [[ $# -ge 2 ]] || err "--status-failure requires a value"
       status_failure_arg="$2"
+      shift 2
+      ;;
+    --transcript)
+      [[ $# -ge 2 ]] || err "--transcript requires a value"
+      transcript_path_arg="$2"
+      shift 2
+      ;;
+    --session-ts)
+      [[ $# -ge 2 ]] || err "--session-ts requires a value"
+      session_ts_arg="$2"
       shift 2
       ;;
     --help|-h)
@@ -210,9 +223,28 @@ task_slug="${task_slug%.yml}"
 task_slug="${task_slug%.yaml}"
 
 session_id="${agent_slug}__${column}___${task_slug}"
-session_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+session_ts="$session_ts_arg"
+if [[ -z "$session_ts" ]]; then
+  session_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 session_id="${session_id}__${session_ts}"
 pane_target="${session_id}:0.0"
+
+transcript_path="$transcript_path_arg"
+if [[ -z "$transcript_path" ]]; then
+  transcript_path="transcripts/${task_slug}/${session_id}.txt"
+fi
+if [[ "$transcript_path" = /* ]]; then
+  transcript_abs_path="$transcript_path"
+else
+  transcript_abs_path="$board_dir/$transcript_path"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  transcript_path="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$transcript_abs_path" "$workspace_dir")"
+else
+  # Fallback keeps behavior if python3 is unavailable.
+  transcript_path="$transcript_abs_path"
+fi
 
 if tmux has-session -t "$session_id" 2>/dev/null; then
   err "tmux session already exists: $session_id"
@@ -226,9 +258,9 @@ ${task_text}
 
 Completion protocol:
 - For success, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${success_status}\" --comment \"<short summary>\"
+konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${success_status}\" --comment \"<short summary>\" --transcript \"${transcript_path}\"
 - For failure/blocker, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\"
+konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\" --transcript \"${transcript_path}\"
 - If additional input from the user is required to proceed, move the task to \"${failure_status}\" and explain what input is needed in the comment."
 
 tmux new-session -d -s "$session_id" -c "$workspace_dir"

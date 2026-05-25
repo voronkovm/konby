@@ -2,8 +2,10 @@ board:
   columns:
     - name: backlog
       wip_limit: -
-    - name: in_progress
+    - name: refinement
       wip_limit: 5
+    - name: development
+      wip_limit: 3
     - name: review
       wip_limit: 3
     - name: done
@@ -21,24 +23,25 @@ rules:
       status: todo
       assignee: "*"
     then:
+      column: refinement
       assignee: bsa
 
   - when:
-      column: in_progress
+      column: development
       assignee: coder
       status: todo
     then:
       assignee: coder
 
   - when:
-      column: in_progress
+      column: development
       assignee: coder
       status: done
     then:
       assignee: qa
 
   - when:
-      column: in_progress
+      column: development
       assignee: qa
       status: done
     then:

@@ -256,10 +256,12 @@ function resolveStatusCfgForTask(task, rules, defaults) {
   return best || base;
 }
 
-function runAgent(projectDir, agent, taskPath, statusCfg) {
+function runAgent(projectDir, agent, taskPath, statusCfg, transcriptPath, sessionTs) {
   const cmd = path.join(__dirname, 'session_new');
   const agentFile = path.join('agents', `${agent}.yaml`);
   const args = ['--board', projectDir, '--agent', agentFile, '--task', taskPath];
+  if (transcriptPath) args.push('--transcript', transcriptPath);
+  if (sessionTs) args.push('--session-ts', sessionTs);
   if (statusCfg && statusCfg.todo) args.push('--status-todo', statusCfg.todo);
   if (statusCfg && statusCfg.in_progress) args.push('--status-in-progress', statusCfg.in_progress);
   if (statusCfg && statusCfg.success) args.push('--status-success', statusCfg.success);
@@ -271,11 +273,27 @@ function runAgent(projectDir, agent, taskPath, statusCfg) {
   return out;
 }
 
+function runTaskMove(projectDir, taskPath, updates) {
+  const cmd = path.join(__dirname, 'task_move');
+  const args = [taskPath];
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'column')) args.push('--column', String(updates.column));
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'status')) args.push('--status', String(updates.status));
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'assignee')) args.push('--assignee', String(updates.assignee));
+  return spawnSync(cmd, args, {
+    cwd: projectDir,
+    encoding: 'utf8',
+  });
+}
+
 function sessionIdForTask(taskFile, task, agent) {
   const column = task.column || 'backlog';
   const taskBase = path.basename(taskFile);
   const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
   return `${agent}__${column}___${taskSlug}`;
+}
+
+function sessionTimestampUtc() {
+  return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
 function listSessionsForTask(taskFile, agent) {
@@ -285,7 +303,7 @@ function listSessionsForTask(taskFile, agent) {
   if (out.status !== 0) return [];
 
   const taskToken = `___${taskSlug}__`;
-  const prefix = `${agent}__`;
+  const prefix = String(agent || '').trim() ? `${agent}__` : '';
   return String(out.stdout || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -295,7 +313,7 @@ function listSessionsForTask(taskFile, agent) {
       const created = Number(createdRaw || 0);
       return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
     })
-    .filter((entry) => entry.name.startsWith(prefix) && entry.name.includes(taskToken))
+    .filter((entry) => (!prefix || entry.name.startsWith(prefix)) && entry.name.includes(taskToken))
     .sort((a, b) => b.created - a.created);
 }
 
@@ -342,11 +360,37 @@ function transcriptFileForSession(projectDir, taskFile, sessionId) {
   return path.join(transcriptsDir, `${sessionSlug}.txt`);
 }
 
-function addSuccessComment(task, agent, transcriptRelPath, atIso) {
+function closeTaskSessionsOnAssigneeChange(projectDir, taskFile) {
+  const sessions = listSessionsForTask(taskFile, '');
+  let closed = 0;
+  let transcriptUpdated = 0;
+  for (const session of sessions) {
+    const cap = captureTmux(session.name, 50);
+    if (cap.ok) {
+      const transcriptAbsPath = transcriptFileForSession(projectDir, taskFile, session.name);
+      const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
+      const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
+      if (prevTranscript === null || prevTranscript !== nextTranscript) {
+        fs.writeFileSync(transcriptAbsPath, nextTranscript, 'utf8');
+        transcriptUpdated += 1;
+      }
+    }
+    const kill = spawnSync('tmux', ['kill-session', '-t', session.name], { encoding: 'utf8' });
+    if (kill.status === 0) closed += 1;
+  }
+  return { found: sessions.length, closed, transcriptUpdated };
+}
+
+function addDispatcherStatusComment(task, nextStatus, reasonText, transcriptRelPath, atIso) {
   if (!Array.isArray(task.comments)) task.comments = [];
+  const reason = String(reasonText || '').trim();
+  const text = reason
+    ? `status_update: status=${nextStatus}; reason=${reason}`
+    : `status_update: status=${nextStatus}`;
   task.comments.push({
-    author: agent,
-    text: `success_update: agent=${agent}; at=${atIso}; transcript=${transcriptRelPath}`,
+    author: 'dispatcher',
+    text,
+    transcript: transcriptRelPath,
     created_at: atIso,
   });
 }
@@ -379,11 +423,12 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
         role: 'system',
         content: [
           'You are a strict task-state classifier.',
-          'Return JSON only: {"outcome":"success|failure|in_progress"}.',
+          'Return JSON only: {"outcome":"success|failure","reason":"<short reason>"}',
           'success means the assignee clearly completed the current task deliverable.',
           'failure means explicit blocker or unrecoverable error.',
-          'in_progress means ongoing, not finished or ambiguous state.',
           'If signals conflict, return failure.',
+          'If completion is not explicit, return failure.',
+          'reason must be concise and grounded in the terminal output.',
         ].join('\n'),
       },
       {
@@ -392,7 +437,7 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
           '<terminal_output>',
           terminalText,
           '</terminal_output>',
-          'Classify current outcome as one of: success|failure|in_progress.',
+          'Classify current outcome as one of: success|failure.',
         ].join('\n\n'),
       },
     ],
@@ -421,16 +466,27 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
     raw = String(content || '').trim();
   }
   let normalized = '';
+  let reason = '';
   try {
     const parsed = JSON.parse(raw);
     normalized = String((parsed || {}).outcome || '').trim().toLowerCase();
+    reason = String((parsed || {}).reason || '').trim();
   } catch (_e) {
     normalized = '';
+    reason = '';
   }
-  if (normalized === 'success' || normalized === 'failure' || normalized === 'in_progress') return normalized;
-  if (raw.toLowerCase().includes('success')) return 'success';
-  if (raw.toLowerCase().includes('failure')) return 'failure';
-  return 'in_progress';
+  if (normalized === 'success' || normalized === 'failure') return { outcome: normalized, reason };
+  if (raw.toLowerCase().includes('success')) return { outcome: 'success', reason: reason || 'classifier fallback: success keyword' };
+  if (raw.toLowerCase().includes('failure')) return { outcome: 'failure', reason: reason || 'classifier fallback: failure keyword' };
+  return { outcome: 'failure', reason: reason || 'classifier fallback: ambiguous output' };
+}
+
+function transcriptForLlm(fullText, edgeLines = 150) {
+  const lines = String(fullText || '').split(/\r?\n/);
+  if (lines.length <= edgeLines * 2) return lines.join('\n').trimEnd();
+  const head = lines.slice(0, edgeLines).join('\n').trimEnd();
+  const tail = lines.slice(-edgeLines).join('\n').trimEnd();
+  return `${head}\n\n... [${lines.length - edgeLines * 2} lines omitted] ...\n\n${tail}`.trimEnd();
 }
 
 async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
@@ -462,18 +518,20 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
 
     const session = mostRecentSessionForTask(item.file, item.data, agent);
     const sessionId = session.name;
+    const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
+    const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
     const cap = captureTmux(sessionId, 50);
     if (!cap.ok) {
       if (item.data.status !== failureStatus) {
+        const nowIso = new Date().toISOString();
         item.data.status = failureStatus;
-        item.data.updated_at = new Date().toISOString();
+        item.data.updated_at = nowIso;
+        addDispatcherStatusComment(item.data, failureStatus, `tmux_unavailable:${cap.error}`, transcriptRelPath, nowIso);
         saveYaml(item.file, item.data);
       }
       updates.push({ file: path.basename(item.file), result: 'failure', reason: `tmux_unavailable:${cap.error}` });
       continue;
     }
-    const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
-    const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
     const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
     const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
     const transcriptChanged = prevTranscript === null || prevTranscript !== nextTranscript;
@@ -482,8 +540,10 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
     }
     if (transcriptChanged) {
       if (item.data.status !== inprogressStatus) {
+        const nowIso = new Date().toISOString();
         item.data.status = inprogressStatus;
-        item.data.updated_at = new Date().toISOString();
+        item.data.updated_at = nowIso;
+        addDispatcherStatusComment(item.data, inprogressStatus, 'terminal_changed', transcriptRelPath, nowIso);
         saveYaml(item.file, item.data);
       }
       updates.push({
@@ -515,11 +575,16 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
       continue;
     }
 
-    let outcome = 'in_progress';
+    let outcome = 'failure';
+    let outcomeReason = '';
     try {
-      outcome = await llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText: cap.tail, task: item.data });
+      const transcriptExcerpt = transcriptForLlm(cap.full, 150);
+      const llmResult = await llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText: transcriptExcerpt, task: item.data });
+      outcome = llmResult.outcome;
+      outcomeReason = llmResult.reason;
     } catch (e) {
       outcome = 'failure';
+      outcomeReason = `llm_error:${String(e.message || e)}`;
       updates.push({ file: path.basename(item.file), result: 'failure', reason: `llm_error:${String(e.message || e)}` });
     }
 
@@ -527,11 +592,13 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
       const nowIso = new Date().toISOString();
       item.data.status = successStatus;
       item.data.updated_at = nowIso;
-      addSuccessComment(item.data, agent, transcriptRelPath, nowIso);
+      addDispatcherStatusComment(item.data, successStatus, outcomeReason, transcriptRelPath, nowIso);
       saveYaml(item.file, item.data);
     } else if (outcome === 'failure' && item.data.status !== failureStatus) {
+      const nowIso = new Date().toISOString();
       item.data.status = failureStatus;
-      item.data.updated_at = new Date().toISOString();
+      item.data.updated_at = nowIso;
+      addDispatcherStatusComment(item.data, failureStatus, outcomeReason, transcriptRelPath, nowIso);
       saveYaml(item.file, item.data);
     }
 
@@ -641,6 +708,7 @@ async function main() {
     const moved = [];
     const skipped = [];
     const launched = [];
+    const taskMoveErrors = [];
 
     for (const rule of rules) {
       for (const item of tasks) {
@@ -654,8 +722,21 @@ async function main() {
           continue;
         }
 
-        applyRule(item.data, rule, statusDefaults);
-        saveYaml(item.file, item.data);
+        const nextTask = { ...item.data };
+        applyRule(nextTask, rule, statusDefaults);
+        const moveResult = runTaskMove(projectDir, item.file, {
+          column: nextTask.column,
+          status: nextTask.status,
+          assignee: nextTask.assignee,
+        });
+        if (moveResult.status !== 0) {
+          taskMoveErrors.push({
+            file: path.basename(item.file),
+            output: `${moveResult.stdout || ''}${moveResult.stderr || ''}`.trim() || 'task_move failed',
+          });
+          continue;
+        }
+        item.data = nextTask;
         moved.push(path.basename(item.file));
 
         if (fromColumn) counts.set(fromColumn, Math.max(0, (counts.get(fromColumn) || 0) - 1));
@@ -666,7 +747,11 @@ async function main() {
           : '';
         if (launchAgent) {
           const launchStatuses = statusCfgFromThen(thenCfg, statusDefaults);
-          const result = runAgent(projectDir, launchAgent, item.file, launchStatuses);
+          const sessionTs = sessionTimestampUtc();
+          const sessionId = `${sessionIdForTask(item.file, item.data, launchAgent)}__${sessionTs}`;
+          const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
+          const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
+          const result = runAgent(projectDir, launchAgent, item.file, launchStatuses, transcriptRelPath, sessionTs);
           launched.push({
             file: path.basename(item.file),
             agent: launchAgent,
@@ -694,6 +779,12 @@ async function main() {
       for (const l of launched) {
         console.log(`- ${l.file}: agent=${l.agent}, ok=${l.ok}`);
         if (!l.ok && l.output) console.log(`  ${l.output.replace(/\n/g, '\n  ')}`);
+      }
+    }
+    if (taskMoveErrors.length > 0) {
+      console.log(`Task move errors: ${taskMoveErrors.length}`);
+      for (const e of taskMoveErrors) {
+        console.log(`- ${e.file}: ${e.output.replace(/\n/g, '\n  ')}`);
       }
     }
   } finally {
