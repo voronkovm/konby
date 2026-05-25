@@ -187,6 +187,7 @@ function extractWhenThen(rule) {
   const thenCfg = (rule && rule.then && typeof rule.then === 'object')
     ? rule.then
     : (thenFromWhen || {
+      status_todo: rule.status_todo,
       column: rule.set_column,
       assignee: rule.set_assignee,
       status_in_progress: rule.status_in_progress,
@@ -208,22 +209,62 @@ function ruleMatches(task, rule) {
 function applyRule(task, rule, defaults) {
   const { thenCfg } = extractWhenThen(rule);
   const nextStatusInProgress = thenCfg.status_in_progress || defaults.in_progress;
-  const nextStatusSuccess = thenCfg.status_success || defaults.success;
-  const nextStatusFailure = thenCfg.status_failure || defaults.failure;
   if (thenCfg.column) task.column = thenCfg.column;
   if (thenCfg.assignee) task.assignee = thenCfg.assignee;
   if (nextStatusInProgress) task.status = nextStatusInProgress;
   else if (thenCfg.status) task.status = thenCfg.status;
-  if (nextStatusInProgress) task.status_in_progress = nextStatusInProgress;
-  if (nextStatusSuccess) task.status_success = nextStatusSuccess;
-  if (nextStatusFailure) task.status_failure = nextStatusFailure;
   task.updated_at = new Date().toISOString();
 }
 
-function runAgent(projectDir, agent, taskPath) {
+function statusCfgFromThen(thenCfg, defaults) {
+  return {
+    todo: String(thenCfg.status_todo || defaults.todo || '').trim(),
+    in_progress: String(thenCfg.status_in_progress || defaults.in_progress || '').trim(),
+    success: String(thenCfg.status_success || defaults.success || '').trim(),
+    failure: String(thenCfg.status_failure || defaults.failure || '').trim(),
+  };
+}
+
+function resolveStatusCfgForTask(task, rules, defaults) {
+  const base = statusCfgFromThen({}, defaults);
+  let best = null;
+  let bestScore = -1;
+
+  for (const rule of rules || []) {
+    const { when, thenCfg } = extractWhenThen(rule);
+    const thenAssignee = String(thenCfg.assignee || '').trim();
+    if (!thenAssignee || thenAssignee === '-' || thenAssignee === '*') continue;
+    if (String(task.assignee || '').trim() !== thenAssignee) continue;
+
+    let score = 2;
+    const expectedColumn = String(thenCfg.column || when.column || '').trim();
+    if (expectedColumn && expectedColumn !== '*') {
+      if (String(task.column || '').trim() !== expectedColumn) continue;
+      score += 2;
+    }
+
+    const cfg = statusCfgFromThen(thenCfg, defaults);
+    const taskStatus = String(task.status || '').trim().toLowerCase();
+    if (cfg.in_progress && taskStatus === cfg.in_progress.toLowerCase()) score += 1;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = cfg;
+    }
+  }
+
+  return best || base;
+}
+
+function runAgent(projectDir, agent, taskPath, statusCfg) {
   const cmd = path.join(__dirname, 'session_new');
   const agentFile = path.join('agents', `${agent}.yaml`);
-  const out = spawnSync(cmd, ['--board', projectDir, '--agent', agentFile, '--task', taskPath], {
+  const args = ['--board', projectDir, '--agent', agentFile, '--task', taskPath];
+  if (statusCfg && statusCfg.todo) args.push('--status-todo', statusCfg.todo);
+  if (statusCfg && statusCfg.in_progress) args.push('--status-in-progress', statusCfg.in_progress);
+  if (statusCfg && statusCfg.success) args.push('--status-success', statusCfg.success);
+  if (statusCfg && statusCfg.failure) args.push('--status-failure', statusCfg.failure);
+  const out = spawnSync(cmd, args, {
     cwd: projectDir,
     encoding: 'utf8',
   });
@@ -392,7 +433,7 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
   return 'in_progress';
 }
 
-async function evaluateNonNewTasks(projectDir, tasks, defaults) {
+async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
   loadEnvFile(path.join(projectDir, '.env'));
 
   const model = process.env.OPENAI_MODEL || 'gpt-5.4-mini';
@@ -408,9 +449,10 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults) {
     const agent = item.data.assignee;
     if (!agent || agent === '-') continue;
 
-    const successStatus = String(defaults.success);
-    const inprogressStatus = String(defaults.in_progress);
-    const failureStatus = String(defaults.failure);
+    const statusCfg = resolveStatusCfgForTask(item.data, rules, defaults);
+    const successStatus = String(statusCfg.success || defaults.success);
+    const inprogressStatus = String(statusCfg.in_progress || defaults.in_progress);
+    const failureStatus = String(statusCfg.failure || defaults.failure);
     const timeoutSec = 300;
     const normalizedStatus = String(item.data.status || '').trim().toLowerCase();
     const normalizedSuccessStatus = String(successStatus || '').trim().toLowerCase();
@@ -593,7 +635,7 @@ async function main() {
     });
 
     const statusDefaults = readStatusDefaults(dispatch);
-    const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks, statusDefaults);
+    const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks, statusDefaults, rules);
 
     const counts = countByColumn(tasks);
     const moved = [];
@@ -623,7 +665,8 @@ async function main() {
           ? thenCfg.assignee
           : '';
         if (launchAgent) {
-          const result = runAgent(projectDir, launchAgent, item.file);
+          const launchStatuses = statusCfgFromThen(thenCfg, statusDefaults);
+          const result = runAgent(projectDir, launchAgent, item.file, launchStatuses);
           launched.push({
             file: path.basename(item.file),
             agent: launchAgent,

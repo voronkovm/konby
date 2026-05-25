@@ -5,6 +5,8 @@ usage() {
   cat <<'USAGE'
 Usage:
   session_new --agent <agent-file> --task <task-file> [--board <path>]
+              [--status-todo <status>] [--status-in-progress <status>]
+              [--status-success <status>] [--status-failure <status>]
 
 Example:
   session_new --agent agents/bsa.yaml --task tasks/task.yaml
@@ -19,6 +21,10 @@ err() {
 agent_input=""
 task_file=""
 board_dir="$(pwd)"
+status_todo_arg=""
+status_in_progress_arg=""
+status_success_arg=""
+status_failure_arg=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +41,26 @@ while [[ $# -gt 0 ]]; do
     --board|--dir)
       [[ $# -ge 2 ]] || err "$1 requires a value"
       board_dir="$2"
+      shift 2
+      ;;
+    --status-todo)
+      [[ $# -ge 2 ]] || err "--status-todo requires a value"
+      status_todo_arg="$2"
+      shift 2
+      ;;
+    --status-in-progress)
+      [[ $# -ge 2 ]] || err "--status-in-progress requires a value"
+      status_in_progress_arg="$2"
+      shift 2
+      ;;
+    --status-success)
+      [[ $# -ge 2 ]] || err "--status-success requires a value"
+      status_success_arg="$2"
+      shift 2
+      ;;
+    --status-failure)
+      [[ $# -ge 2 ]] || err "--status-failure requires a value"
+      status_failure_arg="$2"
       shift 2
       ;;
     --help|-h)
@@ -150,11 +176,19 @@ status_now="$(read_scalar status "$task_file")"
 if [[ -z "$status_now" ]]; then
   status_now="todo"
 fi
-success_status="$(read_scalar status_success "$task_file")"
+todo_status="$status_todo_arg"
+if [[ -z "$todo_status" ]]; then
+  todo_status="todo"
+fi
+in_progress_status="$status_in_progress_arg"
+if [[ -z "$in_progress_status" ]]; then
+  in_progress_status="in_progress"
+fi
+success_status="$status_success_arg"
 if [[ -z "$success_status" ]]; then
   success_status="done"
 fi
-failure_status="$(read_scalar status_failure "$task_file")"
+failure_status="$status_failure_arg"
 if [[ -z "$failure_status" ]]; then
   failure_status="blocked"
 fi
