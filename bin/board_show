@@ -310,6 +310,14 @@ function renderBoard(stateRef) {
     lines.push(`${marker('column')} column: ${stateRef.moveDraft.column}`);
     lines.push(`${marker('status')} status: ${stateRef.moveDraft.status}`);
     lines.push(`${marker('assignee')} assignee: ${stateRef.moveDraft.assignee}`);
+    lines.push(`${marker('comment')} comment (optional):`);
+    const commentLines = String(stateRef.moveDraft.comment || '').split('\n');
+    if (commentLines.length === 1 && commentLines[0] === '') {
+      lines.push('  (empty)');
+    } else {
+      for (const line of commentLines) lines.push(`  ${line}`);
+    }
+    lines.push('Tip: paste multi-line text from clipboard directly into comment.');
   }
   if (stateRef.mode === 'add') {
     lines.push('');
@@ -455,6 +463,7 @@ function updateTaskFile(task, updates) {
   if (updates.column !== undefined) args.push('--column', String(updates.column));
   if (updates.status !== undefined) args.push('--status', String(updates.status));
   if (updates.assignee !== undefined) args.push('--assignee', String(updates.assignee));
+  if (updates.comment !== undefined) args.push('--comment', String(updates.comment));
   runScriptOrThrow('task_move', args);
 }
 
@@ -493,6 +502,7 @@ function startMovePopup(stateRef) {
     column: task.column,
     status: task.status,
     assignee: task.assignee,
+    comment: '',
   };
   stateRef.moveOptions = buildMoveOptions(stateRef);
   stateRef.moveIndex = {
@@ -574,6 +584,11 @@ function buildMoveOptions(stateRef) {
   };
 }
 
+function appendMoveComment(stateRef, text) {
+  if (!text) return;
+  stateRef.moveDraft.comment += String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
 function handleMoveInput(stateRef, key) {
   if (key === '\u001b') {
     stateRef.mode = 'normal';
@@ -581,12 +596,35 @@ function handleMoveInput(stateRef, key) {
     return;
   }
   if (key === '\u001b[A') {
-    stateRef.moveField = stateRef.moveField === 'column' ? 'assignee' : stateRef.moveField === 'status' ? 'column' : 'status';
+    stateRef.moveField = stateRef.moveField === 'column'
+      ? 'comment'
+      : stateRef.moveField === 'status'
+        ? 'column'
+        : stateRef.moveField === 'assignee'
+          ? 'status'
+          : 'assignee';
     return;
   }
   if (key === '\u001b[B') {
-    stateRef.moveField = stateRef.moveField === 'column' ? 'status' : stateRef.moveField === 'status' ? 'assignee' : 'column';
+    stateRef.moveField = stateRef.moveField === 'column'
+      ? 'status'
+      : stateRef.moveField === 'status'
+        ? 'assignee'
+        : stateRef.moveField === 'assignee'
+          ? 'comment'
+          : 'column';
     return;
+  }
+  if (stateRef.moveField === 'comment') {
+    if (key === '\u007f') {
+      stateRef.moveDraft.comment = stateRef.moveDraft.comment.slice(0, -1);
+      return;
+    }
+    if (key === '\t') return;
+    if (key !== '\r') {
+      appendMoveComment(stateRef, key);
+      return;
+    }
   }
   if (key === '\u001b[D') {
     const f = stateRef.moveField;
@@ -615,7 +653,14 @@ function handleMoveInput(stateRef, key) {
       return;
     }
     try {
-      updateTaskFile(task, stateRef.moveDraft);
+      const updates = {
+        column: stateRef.moveDraft.column,
+        status: stateRef.moveDraft.status,
+        assignee: stateRef.moveDraft.assignee,
+      };
+      const commentText = String(stateRef.moveDraft.comment || '').trim();
+      if (commentText) updates.comment = commentText;
+      updateTaskFile(task, updates);
       stateRef.mode = 'normal';
       setMessage(stateRef, `Task ${task.file} updated`);
       refreshBoard(stateRef);
@@ -820,7 +865,7 @@ function main() {
     selectedTask: 0,
     mode: 'normal',
     moveField: 'column',
-    moveDraft: { column: '', status: '', assignee: '' },
+    moveDraft: { column: '', status: '', assignee: '', comment: '' },
     moveOptions: { column: [], status: [], assignee: [] },
     moveIndex: { column: 0, status: 0, assignee: 0 },
     addBuffer: '',
