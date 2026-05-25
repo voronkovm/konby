@@ -129,7 +129,7 @@ function saveYaml(filePath, obj) {
 }
 
 function usage() {
-  process.stdout.write('Usage: task_move <task-file> [--stage <stage>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]\n');
+  process.stdout.write('Usage: task_move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]\n');
 }
 
 function main() {
@@ -140,16 +140,22 @@ function main() {
   }
 
   const taskFile = argv[0];
-  let stage;
+  let column;
   let status;
   let assignee;
   let comment;
 
   for (let i = 1; i < argv.length; i += 1) {
     const token = argv[i];
+    if (token === '--column') {
+      if (!argv[i + 1]) throw new Error('Missing value after --column');
+      column = argv[i + 1];
+      i += 1;
+      continue;
+    }
     if (token === '--stage') {
       if (!argv[i + 1]) throw new Error('Missing value after --stage');
-      stage = argv[i + 1];
+      column = argv[i + 1];
       i += 1;
       continue;
     }
@@ -174,15 +180,15 @@ function main() {
     throw new Error(`Unknown argument: ${token}`);
   }
 
-  if (stage === undefined && status === undefined && assignee === undefined && comment === undefined) {
-    throw new Error('At least one of --stage, --status, --assignee, --comment must be provided');
+  if (column === undefined && status === undefined && assignee === undefined && comment === undefined) {
+    throw new Error('At least one of --column, --status, --assignee, --comment must be provided');
   }
 
   const fullTaskPath = path.resolve(taskFile);
   if (!fs.existsSync(fullTaskPath)) throw new Error(`Task file not found: ${fullTaskPath}`);
 
   const data = loadYaml(fullTaskPath);
-  if (stage !== undefined) data.stage = stage;
+  if (column !== undefined) data.column = column;
   if (status !== undefined) data.status = status;
   if (assignee !== undefined) data.assignee = assignee;
   if (comment !== undefined) {

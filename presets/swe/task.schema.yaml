@@ -1,5 +1,5 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "https://example.com/schemas/task.schema.yml"
+$id: "https://example.com/schemas/task.schema.yaml"
 title: "Task"
 description: "Schema for a single task file in a tracker-like YAML format"
 type: object
@@ -28,28 +28,19 @@ properties:
     enum: [task, bug, feature, epic]
     default: task
 
-  stage:
+  column:
     type: string
     default: backlog
     enum:
       - backlog
-      - refinement
-      - coding
-      - code-review
-      - acceptance_testing
-      - regression_testing
+      - in_progress
       - review
       - done
 
   status:
     type: string
     default: todo
-    enum:
-      - todo
-      - in_progress
-      - blocked
-      - review
-      - done
+    enum: [todo, in_progress, blocked, done]
 
   priority:
     type: string

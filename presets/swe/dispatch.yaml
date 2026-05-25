@@ -1,0 +1,54 @@
+board:
+  columns:
+    - name: backlog
+      wip_limit: -
+    - name: in_progress
+      wip_limit: 5
+    - name: review
+      wip_limit: 3
+    - name: done
+      wip_limit: -
+
+defaults:
+  status_todo: todo
+  status_in_progress: in_progress
+  status_success: done
+  status_failure: blocked
+
+rules:
+  - when:
+      column: backlog
+      status: todo
+      assignee: "*"
+    then:
+      assignee: bsa
+
+  - when:
+      column: in_progress
+      assignee: coder
+      status: todo
+    then:
+      assignee: coder
+
+  - when:
+      column: in_progress
+      assignee: coder
+      status: done
+    then:
+      assignee: qa
+
+  - when:
+      column: in_progress
+      assignee: qa
+      status: done
+    then:
+      column: review
+      assignee: "-"
+
+  - when:
+      column: review
+      assignee: "*"
+      status: done
+    then:
+      column: done
+      assignee: "-"

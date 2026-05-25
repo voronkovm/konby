@@ -134,28 +134,29 @@ function saveYaml(filePath, obj) {
   fs.writeFileSync(filePath, `${formatYaml(obj)}\n`, 'utf8');
 }
 
-function stageAliases(stage) {
-  if (stage === 'code-reivew') return ['code-reivew', 'code-review'];
-  if (stage === 'code-review') return ['code-review', 'code-reivew'];
-  return [stage];
+function readStatusDefaults(dispatchCfg) {
+  const fallback = {
+    in_progress: 'in_progress',
+    success: 'done',
+    failure: 'blocked',
+  };
+  const raw = (dispatchCfg && dispatchCfg.defaults) || {};
+  const todo = String(raw.status_todo || '').trim();
+  const inProgress = String(raw.status_in_progress || '').trim();
+  const success = String(raw.status_success || '').trim();
+  const failure = String(raw.status_failure || '').trim();
+  return {
+    todo,
+    in_progress: inProgress || fallback.in_progress,
+    success: success || fallback.success,
+    failure: failure || fallback.failure,
+  };
 }
 
-function buildStageToColumn(columns) {
-  const map = new Map();
-  for (const col of columns) {
-    for (const stage of col.stages || []) {
-      for (const alias of stageAliases(stage)) {
-        map.set(alias, col.name);
-      }
-    }
-  }
-  return map;
-}
-
-function countByColumn(tasks, stageToColumn) {
+function countByColumn(tasks) {
   const counts = new Map();
   for (const t of tasks) {
-    const col = stageToColumn.get(t.data.stage);
+    const col = t.data.column;
     if (!col) continue;
     counts.set(col, (counts.get(col) || 0) + 1);
   }
@@ -171,53 +172,96 @@ function canEnterColumn(column, columnsByName, counts) {
   return (counts.get(column) || 0) < limit;
 }
 
-function ruleMatches(task, rule) {
-  if (!(rule.stage === '*' || task.stage === rule.stage)) return false;
-  if (!(rule.status === '*' || task.status === rule.status)) return false;
-  if (rule.assignee === '*' || rule.assignee === undefined) return true;
-  return task.assignee === rule.assignee;
+function extractWhenThen(rule) {
+  const whenObj = (rule && rule.when && typeof rule.when === 'object') ? { ...rule.when } : null;
+  const thenFromWhen = whenObj && whenObj.then && typeof whenObj.then === 'object'
+    ? { ...whenObj.then }
+    : null;
+  if (whenObj && Object.prototype.hasOwnProperty.call(whenObj, 'then')) delete whenObj.then;
+
+  const when = whenObj || {
+    column: rule.column,
+    status: rule.status,
+    assignee: rule.assignee,
+  };
+  const thenCfg = (rule && rule.then && typeof rule.then === 'object')
+    ? rule.then
+    : (thenFromWhen || {
+      column: rule.set_column,
+      assignee: rule.set_assignee,
+      status_in_progress: rule.status_in_progress,
+      status: rule.set_status,
+      status_success: rule.status_success,
+      status_failure: rule.status_failure,
+    });
+  return { when, thenCfg };
 }
 
-function applyRule(task, rule) {
-  if (rule.set_stage) task.stage = rule.set_stage;
-  if (rule.set_status) task.status = rule.set_status;
-  if (rule.set_assignee) task.assignee = rule.set_assignee;
+function ruleMatches(task, rule) {
+  const { when } = extractWhenThen(rule);
+  if (!(when.column === '*' || when.column === undefined || task.column === when.column)) return false;
+  if (!(when.status === '*' || when.status === undefined || task.status === when.status)) return false;
+  if (when.assignee === '*' || when.assignee === undefined) return true;
+  return task.assignee === when.assignee;
+}
+
+function applyRule(task, rule, defaults) {
+  const { thenCfg } = extractWhenThen(rule);
+  const nextStatusInProgress = thenCfg.status_in_progress || defaults.in_progress;
+  const nextStatusSuccess = thenCfg.status_success || defaults.success;
+  const nextStatusFailure = thenCfg.status_failure || defaults.failure;
+  if (thenCfg.column) task.column = thenCfg.column;
+  if (thenCfg.assignee) task.assignee = thenCfg.assignee;
+  if (nextStatusInProgress) task.status = nextStatusInProgress;
+  else if (thenCfg.status) task.status = thenCfg.status;
+  if (nextStatusInProgress) task.status_in_progress = nextStatusInProgress;
+  if (nextStatusSuccess) task.status_success = nextStatusSuccess;
+  if (nextStatusFailure) task.status_failure = nextStatusFailure;
   task.updated_at = new Date().toISOString();
 }
 
 function runAgent(projectDir, agent, taskPath) {
   const cmd = path.join(__dirname, 'session_new');
-  const out = spawnSync(cmd, ['--board', projectDir, '--agent', agent, '--task', taskPath], {
+  const agentFile = path.join('agents', `${agent}.yaml`);
+  const out = spawnSync(cmd, ['--board', projectDir, '--agent', agentFile, '--task', taskPath], {
     cwd: projectDir,
     encoding: 'utf8',
   });
   return out;
 }
 
-function readScalarFromYaml(key, file) {
-  try {
-    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
-    for (const raw of lines) {
-      const match = raw.match(new RegExp(`^\\s*${key}:\\s*(.*)\\s*$`));
-      if (!match) continue;
-      let value = match[1].trim();
-      if (!value || value === '|') return '';
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
-      return value;
-    }
-    return '';
-  } catch (_e) {
-    return '';
-  }
-}
-
 function sessionIdForTask(taskFile, task, agent) {
-  const stage = task.stage || 'backlog';
+  const column = task.column || 'backlog';
   const taskBase = path.basename(taskFile);
   const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
-  return `${agent}__${stage}___${taskSlug}`;
+  return `${agent}__${column}___${taskSlug}`;
+}
+
+function listSessionsForTask(taskFile, agent) {
+  const taskBase = path.basename(taskFile);
+  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
+  const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
+  if (out.status !== 0) return [];
+
+  const taskToken = `___${taskSlug}__`;
+  const prefix = `${agent}__`;
+  return String(out.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, createdRaw] = line.split('\t');
+      const created = Number(createdRaw || 0);
+      return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
+    })
+    .filter((entry) => entry.name.startsWith(prefix) && entry.name.includes(taskToken))
+    .sort((a, b) => b.created - a.created);
+}
+
+function mostRecentSessionForTask(taskFile, task, agent) {
+  const sessions = listSessionsForTask(taskFile, agent);
+  if (sessions.length > 0) return sessions[0];
+  return { name: sessionIdForTask(taskFile, task, agent), created: 0 };
 }
 
 function captureTmux(sessionId, tailLines = 50) {
@@ -236,16 +280,25 @@ function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
-function transcriptFileForSession(projectDir, sessionId) {
-  const transcriptsDir = path.join(projectDir, 'transcripts');
-  ensureDir(transcriptsDir);
-  return path.join(transcriptsDir, sessionId);
+function sanitizePathToken(value, fallback) {
+  const safe = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return safe || fallback;
 }
 
-function writeTranscript(projectDir, sessionId, text) {
-  const file = transcriptFileForSession(projectDir, sessionId);
-  fs.writeFileSync(file, text.endsWith('\n') ? text : `${text}\n`, 'utf8');
-  return file;
+function transcriptFileForSession(projectDir, taskFile, sessionId) {
+  const taskSlug = sanitizePathToken(path.basename(taskFile).replace(/\.ya?ml$/i, ''), 'task');
+  const rawSessionSlug = sanitizePathToken(sessionId || 'session', 'session');
+  const taskToken = `___${taskSlug}__`;
+  const sessionSlug = rawSessionSlug.includes(taskToken)
+    ? rawSessionSlug.replace(taskToken, '__')
+    : rawSessionSlug;
+  const transcriptsDir = path.join(projectDir, 'transcripts', taskSlug);
+  ensureDir(transcriptsDir);
+  return path.join(transcriptsDir, `${sessionSlug}.txt`);
 }
 
 function addSuccessComment(task, agent, transcriptRelPath, atIso) {
@@ -255,19 +308,6 @@ function addSuccessComment(task, agent, transcriptRelPath, atIso) {
     text: `success_update: agent=${agent}; at=${atIso}; transcript=${transcriptRelPath}`,
     created_at: atIso,
   });
-}
-
-function detectDispatchResultMarker(text) {
-  const out = spawnSync(
-    'grep',
-    ['-Eim1', '^\\s*DISPATCH_RESULT\\s*:\\s*(success|failure|nochange)\\s*$'],
-    { input: String(text || ''), encoding: 'utf8' },
-  );
-  if (out.status !== 0) return '';
-  const line = String(out.stdout || '').split(/\r?\n/).find((x) => x.trim());
-  if (!line) return '';
-  const m = line.match(/:\s*(success|failure|nochange)\s*$/i);
-  return m ? m[1].toLowerCase() : '';
 }
 
 function loadEnvFile(envPath) {
@@ -298,10 +338,10 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
         role: 'system',
         content: [
           'You are a strict task-state classifier.',
-          'Return JSON only: {"outcome":"success|failure|nochange"}.',
-          'success means the assignee clearly completed the current stage deliverable.',
+          'Return JSON only: {"outcome":"success|failure|in_progress"}.',
+          'success means the assignee clearly completed the current task deliverable.',
           'failure means explicit blocker or unrecoverable error.',
-          'nochange means ongoing or ambiguous state.',
+          'in_progress means ongoing, not finished or ambiguous state.',
           'If signals conflict, return failure.',
         ].join('\n'),
       },
@@ -311,7 +351,7 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
           '<terminal_output>',
           terminalText,
           '</terminal_output>',
-          'Classify current outcome as one of: success|failure|nochange.',
+          'Classify current outcome as one of: success|failure|in_progress.',
         ].join('\n\n'),
       },
     ],
@@ -346,13 +386,13 @@ async function llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText, t
   } catch (_e) {
     normalized = '';
   }
-  if (normalized === 'success' || normalized === 'failure' || normalized === 'nochange') return normalized;
+  if (normalized === 'success' || normalized === 'failure' || normalized === 'in_progress') return normalized;
   if (raw.toLowerCase().includes('success')) return 'success';
   if (raw.toLowerCase().includes('failure')) return 'failure';
-  return 'nochange';
+  return 'in_progress';
 }
 
-async function evaluateNonNewTasks(projectDir, tasks) {
+async function evaluateNonNewTasks(projectDir, tasks, defaults) {
   loadEnvFile(path.join(projectDir, '.env'));
 
   const model = process.env.OPENAI_MODEL || 'gpt-5.4-mini';
@@ -361,28 +401,25 @@ async function evaluateNonNewTasks(projectDir, tasks) {
   const endpoint = process.env.OPENAI_API_ENDPOINT || '/chat/completions';
 
   const updates = [];
+  const todoStatus = String(defaults.todo || '').trim().toLowerCase();
 
   for (const item of tasks) {
-    if (item.data.status === 'todo') continue;
+    if (String(item.data.status || '').trim().toLowerCase() === todoStatus) continue;
     const agent = item.data.assignee;
-    if (!agent || agent === '*') continue;
+    if (!agent || agent === '-') continue;
 
-    const agentFile = path.join(projectDir, 'agents', `${agent}.yml`);
-    const successStatus = readScalarFromYaml('success_status', agentFile);
-    const inprogressStatus = readScalarFromYaml('inprogress_status', agentFile) || 'in_progress';
-    const failureStatus = readScalarFromYaml('failure_status', agentFile) || 'failure';
-    const timeoutRaw = readScalarFromYaml('timeout', agentFile);
-    const timeoutSec = Number.isFinite(Number(timeoutRaw)) ? Math.max(0, Number(timeoutRaw)) : 300;
-
-    if (!fs.existsSync(agentFile) || !successStatus) continue;
+    const successStatus = String(defaults.success);
+    const inprogressStatus = String(defaults.in_progress);
+    const failureStatus = String(defaults.failure);
+    const timeoutSec = 300;
     const normalizedStatus = String(item.data.status || '').trim().toLowerCase();
     const normalizedSuccessStatus = String(successStatus || '').trim().toLowerCase();
     const normalizedFailureStatus = String(failureStatus || '').trim().toLowerCase();
-    if (normalizedStatus === normalizedSuccessStatus || normalizedStatus === normalizedFailureStatus) {
-      continue;
-    }
+    const isTerminalStatus =
+      normalizedStatus === normalizedSuccessStatus || normalizedStatus === normalizedFailureStatus;
 
-    const sessionId = sessionIdForTask(item.file, item.data, agent);
+    const session = mostRecentSessionForTask(item.file, item.data, agent);
+    const sessionId = session.name;
     const cap = captureTmux(sessionId, 50);
     if (!cap.ok) {
       if (item.data.status !== failureStatus) {
@@ -393,39 +430,30 @@ async function evaluateNonNewTasks(projectDir, tasks) {
       updates.push({ file: path.basename(item.file), result: 'failure', reason: `tmux_unavailable:${cap.error}` });
       continue;
     }
-    const transcriptAbsPath = transcriptFileForSession(projectDir, sessionId);
-    const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || `transcripts/${sessionId}`;
+    const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
+    const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
     const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
     const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
     const transcriptChanged = prevTranscript === null || prevTranscript !== nextTranscript;
     if (transcriptChanged) {
       fs.writeFileSync(transcriptAbsPath, nextTranscript, 'utf8');
     }
-    const markerOutcome = detectDispatchResultMarker(cap.full);
-    if (markerOutcome === 'success' && item.data.status !== successStatus) {
-      const nowIso = new Date().toISOString();
-      item.data.status = successStatus;
-      item.data.updated_at = nowIso;
-      addSuccessComment(item.data, agent, transcriptRelPath, nowIso);
-      saveYaml(item.file, item.data);
-      updates.push({ file: path.basename(item.file), result: 'success', reason: 'dispatch_marker' });
-      continue;
-    }
-    if (markerOutcome === 'failure' && item.data.status !== failureStatus) {
-      item.data.status = failureStatus;
-      item.data.updated_at = new Date().toISOString();
-      saveYaml(item.file, item.data);
-      updates.push({ file: path.basename(item.file), result: 'failure', reason: 'dispatch_marker' });
-      continue;
-    }
-
     if (transcriptChanged) {
       if (item.data.status !== inprogressStatus) {
         item.data.status = inprogressStatus;
         item.data.updated_at = new Date().toISOString();
         saveYaml(item.file, item.data);
       }
-      updates.push({ file: path.basename(item.file), result: 'nochange', reason: 'terminal_changed' });
+      updates.push({
+        file: path.basename(item.file),
+        result: 'in_progress',
+        reason: 'terminal_changed',
+      });
+      continue;
+    }
+
+    if (isTerminalStatus) {
+      updates.push({ file: path.basename(item.file), result: normalizedStatus, reason: 'terminal_status_no_transition' });
       continue;
     }
 
@@ -434,18 +462,18 @@ async function evaluateNonNewTasks(projectDir, tasks) {
     if (unchangedForSec <= timeoutSec) {
       updates.push({
         file: path.basename(item.file),
-        result: 'nochange',
+        result: inprogressStatus,
         reason: `terminal_unchanged_timeout_not_reached:${Math.floor(unchangedForSec)}s<=${timeoutSec}s`,
       });
       continue;
     }
 
     if (!apiKey) {
-      updates.push({ file: path.basename(item.file), result: 'nochange', reason: 'missing_openai_api_key' });
+      updates.push({ file: path.basename(item.file), result: inprogressStatus, reason: 'missing_openai_api_key' });
       continue;
     }
 
-    let outcome = 'nochange';
+    let outcome = 'in_progress';
     try {
       outcome = await llmTaskStatus({ model, apiKey, baseUrl, endpoint, terminalText: cap.tail, task: item.data });
     } catch (e) {
@@ -541,17 +569,16 @@ async function main() {
   }
 
   try {
-    const dispatchPath = path.join(projectDir, 'dispatch.yml');
+    const dispatchPath = path.join(projectDir, 'dispatch.yaml');
     const tasksDir = path.join(projectDir, 'tasks');
 
-    if (!fs.existsSync(dispatchPath)) throw new Error(`dispatch.yml not found: ${dispatchPath}`);
+    if (!fs.existsSync(dispatchPath)) throw new Error(`dispatch.yaml not found: ${dispatchPath}`);
     if (!fs.existsSync(tasksDir)) throw new Error(`tasks dir not found: ${tasksDir}`);
 
     const dispatch = loadYaml(dispatchPath);
     const columns = (dispatch.board && dispatch.board.columns) || [];
     const rules = dispatch.rules || [];
     const columnsByName = new Map(columns.map((c) => [c.name, c]));
-    const stageToColumn = buildStageToColumn(columns);
 
     const taskFiles = fs.readdirSync(tasksDir)
       .filter((f) => /\.ya?ml$/i.test(f))
@@ -559,12 +586,16 @@ async function main() {
 
     const tasks = taskFiles.map((file) => {
       const full = path.join(tasksDir, file);
-      return { file: full, data: loadYaml(full) };
+      const data = loadYaml(full);
+      if (!data.column && data.stage) data.column = data.stage;
+      if (!data.column) data.column = 'backlog';
+      return { file: full, data };
     });
 
-    const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks);
+    const statusDefaults = readStatusDefaults(dispatch);
+    const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks, statusDefaults);
 
-    const counts = countByColumn(tasks, stageToColumn);
+    const counts = countByColumn(tasks);
     const moved = [];
     const skipped = [];
     const launched = [];
@@ -572,27 +603,30 @@ async function main() {
     for (const rule of rules) {
       for (const item of tasks) {
         if (!ruleMatches(item.data, rule)) continue;
-        const fromColumn = stageToColumn.get(item.data.stage);
-        const toStage = rule.set_stage || item.data.stage;
-        const toColumn = stageToColumn.get(toStage);
+        const fromColumn = item.data.column || 'backlog';
+        const { thenCfg } = extractWhenThen(rule);
+        const toColumn = thenCfg.column || fromColumn;
 
         if (toColumn && !canEnterColumn(toColumn, columnsByName, counts)) {
           skipped.push({ file: path.basename(item.file), reason: `WIP limit reached in column ${toColumn}` });
           continue;
         }
 
-        applyRule(item.data, rule);
+        applyRule(item.data, rule, statusDefaults);
         saveYaml(item.file, item.data);
         moved.push(path.basename(item.file));
 
         if (fromColumn) counts.set(fromColumn, Math.max(0, (counts.get(fromColumn) || 0) - 1));
         if (toColumn) counts.set(toColumn, (counts.get(toColumn) || 0) + 1);
 
-        if (rule.set_assignee) {
-          const result = runAgent(projectDir, rule.set_assignee, item.file);
+        const launchAgent = (thenCfg.assignee && thenCfg.assignee !== '-')
+          ? thenCfg.assignee
+          : '';
+        if (launchAgent) {
+          const result = runAgent(projectDir, launchAgent, item.file);
           launched.push({
             file: path.basename(item.file),
-            agent: rule.set_assignee,
+            agent: launchAgent,
             ok: result.status === 0,
             output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
           });

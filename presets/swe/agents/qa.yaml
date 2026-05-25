@@ -9,7 +9,4 @@ role: |
   - Confirm verification result (pass/fail) and risks.
   - In your response, show: what was tested, which defects were found, and final status.
 
-success_status: "done"
-inprogress_status: "in_progress"
-failure_status: "blocked"
-cli: "ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CONFIG_DIR=~/.claude1 claude --dangerously-skip-permissions"
+cli: "codex --no-alt-screen --ask-for-approval never --search"

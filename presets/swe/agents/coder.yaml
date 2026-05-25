@@ -9,7 +9,4 @@ role: |
   - After changes, run relevant tests/lint checks.
   - In your response, show: what was done, which files were changed, and how to verify.
 
-success_status: "done"
-inprogress_status: "in_progress"
-failure_status: "blocked"
-cli: "ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CONFIG_DIR=~/.claude1 claude --dangerously-skip-permissions"
+cli: "codex --no-alt-screen --ask-for-approval never --search"

@@ -4,10 +4,10 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  session_new --agent <agent-slug> --task <task-file> [--board <path>]
+  session_new --agent <agent-file> --task <task-file> [--board <path>]
 
 Example:
-  session_new --agent coder --task tasks/task.yml
+  session_new --agent agents/bsa.yaml --task tasks/task.yaml
 USAGE
 }
 
@@ -16,7 +16,7 @@ err() {
   exit 1
 }
 
-agent_slug=""
+agent_input=""
 task_file=""
 board_dir="$(pwd)"
 
@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --agent)
       [[ $# -ge 2 ]] || err "--agent requires a value"
-      agent_slug="$2"
+      agent_input="$2"
       shift 2
       ;;
     --task)
@@ -47,14 +47,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$agent_slug" ]] || err "--agent is required"
+[[ -n "$agent_input" ]] || err "--agent is required"
 [[ -n "$task_file" ]] || err "--task is required"
 board_dir="$(cd "$board_dir" && pwd)"
+board_parent_dir="$(cd "$board_dir/.." && pwd)"
 cd "$board_dir"
 
 [[ -f "$task_file" ]] || err "Task file not found: $task_file"
-agent_file="agents/${agent_slug}.yml"
-[[ -f "$agent_file" ]] || err "Agent file not found: $agent_file"
+
+resolve_agent_file() {
+  local input="$1"
+  [[ "$input" == */* || "$input" == *.yml || "$input" == *.yaml ]] || return 1
+  local candidate="$input"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if [[ "$candidate" != *.yml && "$candidate" != *.yaml ]]; then
+    if [[ -f "${candidate}.yaml" ]]; then
+      printf '%s\n' "${candidate}.yaml"
+      return 0
+    fi
+    if [[ -f "${candidate}.yml" ]]; then
+      printf '%s\n' "${candidate}.yml"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+if ! agent_file="$(resolve_agent_file "$agent_input")"; then
+  err "Agent file not found: $agent_input"
+fi
+
+agent_slug="$(basename "$agent_file")"
+agent_slug="${agent_slug%.yaml}"
+agent_slug="${agent_slug%.yml}"
 command -v tmux >/dev/null 2>&1 || err "tmux is not installed"
 
 # Reads a block scalar, e.g. role: |
@@ -114,26 +142,30 @@ role_text="$(read_block_scalar role "$agent_file")"
 cli_cmd="$(read_scalar cli "$agent_file")"
 [[ -n "$cli_cmd" ]] || err "Could not read cli from $agent_file"
 
-stage="$(read_scalar stage "$task_file")"
-if [[ -z "$stage" ]]; then
-  stage="backlog"
+column="$(read_scalar column "$task_file")"
+if [[ -z "$column" ]]; then
+  column="backlog"
 fi
 status_now="$(read_scalar status "$task_file")"
 if [[ -z "$status_now" ]]; then
   status_now="todo"
 fi
-success_status="$(read_scalar success_status "$agent_file")"
+success_status="$(read_scalar status_success "$task_file")"
 if [[ -z "$success_status" ]]; then
   success_status="done"
 fi
-failure_status="$(read_scalar failure_status "$agent_file")"
+failure_status="$(read_scalar status_failure "$task_file")"
 if [[ -z "$failure_status" ]]; then
   failure_status="blocked"
 fi
-
 workspace_dir="$(read_scalar workspace_dir "$task_file")"
 if [[ -z "$workspace_dir" ]]; then
-  workspace_dir="$(pwd)"
+  workspace_dir="$(read_scalar workspace "$task_file")"
+fi
+if [[ -z "$workspace_dir" ]]; then
+  workspace_dir="$board_dir"
+elif [[ "$workspace_dir" != /* ]]; then
+  workspace_dir="$board_parent_dir/$workspace_dir"
 fi
 [[ -d "$workspace_dir" ]] || err "workspace_dir does not exist or is not a directory: $workspace_dir"
 task_abs_path="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
@@ -143,7 +175,9 @@ task_slug="$task_base"
 task_slug="${task_slug%.yml}"
 task_slug="${task_slug%.yaml}"
 
-session_id="${agent_slug}__${stage}___${task_slug}"
+session_id="${agent_slug}__${column}___${task_slug}"
+session_ts="$(date -u +%Y%m%dT%H%M%SZ)"
+session_id="${session_id}__${session_ts}"
 pane_target="${session_id}:0.0"
 
 if tmux has-session -t "$session_id" 2>/dev/null; then
@@ -153,41 +187,101 @@ fi
 task_text="$(cat "$task_file")"
 prompt="${role_text}
 
-Do the following task consiering comments and updates:
+Do the following task considering comments and updates:
 ${task_text}
 
 Completion protocol:
 - For success, update task yourself with:
-konby task move \"${task_abs_path}\" --stage \"${stage}\" --status \"${success_status}\" --comment \"<short summary>\"
+konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${success_status}\" --comment \"<short summary>\"
 - For failure/blocker, update task yourself with:
-konby task move \"${task_abs_path}\" --stage \"${stage}\" --status \"${failure_status}\" --comment \"<short blocker reason>\"
-- If work is still in progress, keep status \"${status_now}\".
-- Do not output DISPATCH_RESULT markers."
+konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\"
+- If additional input from the user is required to proceed, move the task to \"${failure_status}\" and explain what input is needed in the comment."
 
 tmux new-session -d -s "$session_id" -c "$workspace_dir"
 tmux set-option -t "$session_id" mouse on
+tmux bind-key -n C-\] detach-client
+tmux set-option -t "$session_id" status-right "Back to kanban board: Ctrl+]"
 sleep 0.2
+
+# Checks pane tail and auto-answers known startup dialogs.
+# Returns:
+#   0 if something was handled and sent to pane
+#   1 if nothing matched
+handle_startup_dialogs() {
+  local pane="$1"
+  local cli="$2"
+  local out
+  out="$(tmux capture-pane -t "$pane" -p -S -200)"
+
+  # Codex-only update dialog.
+  if [[ "$cli" =~ codex ]]; then
+    if grep -qiE "Update available|Release notes: .*codex/releases/latest|Update now" <<<"$out"; then
+      tmux send-keys -t "$pane" -l -- "1"
+      tmux send-keys -t "$pane" C-m
+      return 0
+    fi
+  fi
+
+  # Existing trust prompts.
+  if grep -qiE "Yes, I trust this folder|Do you trust the contents" <<<"$out"; then
+    tmux send-keys -t "$pane" -l -- "1"
+    tmux send-keys -t "$pane" C-m
+    return 0
+  fi
+
+  return 1
+}
+
+# Waits until CLI is actually ready for user input.
+# Handles startup dialogs during wait.
+wait_for_cli_ready() {
+  local pane="$1"
+  local cli="$2"
+  local tries=120
+  local delay=0.5
+  local out
+
+  for ((i=1; i<=tries; i++)); do
+    handle_startup_dialogs "$pane" "$cli" && { sleep "$delay"; continue; }
+
+    out="$(tmux capture-pane -t "$pane" -p -S -200)"
+
+    if [[ "$cli" =~ codex ]]; then
+      # Codex prompt line usually starts with `› `.
+      if grep -qE '^[[:space:]]*›[[:space:]]' <<<"$out"; then
+        return 0
+      fi
+    elif [[ "$cli" =~ claude ]]; then
+      # Claude input prompt usually starts with `❯`.
+      if grep -qE '^[[:space:]]*❯' <<<"$out"; then
+        return 0
+      fi
+    else
+      # Fallback readiness signal for unknown CLIs.
+      if grep -qE '^[[:space:]]*[›❯>][[:space:]]' <<<"$out"; then
+        return 0
+      fi
+    fi
+
+    sleep "$delay"
+  done
+
+  return 1
+}
 
 # Send command literally, then explicit Enter (C-m) for better tmux compatibility.
 tmux send-keys -t "$pane_target" -l -- "$cli_cmd"
 tmux send-keys -t "$pane_target" C-m
-sleep 1
-
-if tmux capture-pane -t "$pane_target" -p -S -100 | grep -qi "Yes, I trust this folder"; then
-  tmux send-keys -t "$pane_target" -l -- "1"
-  tmux send-keys -t "$pane_target" C-m
+if ! wait_for_cli_ready "$pane_target" "$cli_cmd"; then
+  echo "Warning: timed out waiting for CLI input readiness in session ${session_id}" >&2
 fi
 
-if tmux capture-pane -t "$pane_target" -p -S -100 | grep -qi "Do you trust the contents"; then
-  tmux send-keys -t "$pane_target" -l -- "1"
-  tmux send-keys -t "$pane_target" C-m
-fi
-
-sleep 1
+# Use bracketed paste markers so multiline prompt is inserted as one block.
+# This prevents CLIs from submitting on embedded newlines while pasting.
+tmux send-keys -t "$pane_target" -l -- $'\e[200~'
 tmux set-buffer -- "$prompt"
 tmux paste-buffer -t "$pane_target"
-tmux send-keys -t "$pane_target" C-m
-sleep 1
+tmux send-keys -t "$pane_target" -l -- $'\e[201~'
 tmux send-keys -t "$pane_target" C-m
 
 echo "Started tmux session: $session_id"

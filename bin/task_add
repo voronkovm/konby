@@ -456,7 +456,7 @@ function usage(schema) {
   const keys = Object.keys(schema.properties || {});
   return [
     'Usage:',
-    '  task_add [--tasks <tasks_dir_rel>] [--schema <task.schema.yml>] --title "..." [--id 10-my-task] [--status todo] [--priority medium] [--stage backlog] [--board <path>]',
+    '  task_add [--tasks <tasks_dir_rel>] [--schema <task.schema.yaml>] --title "..." [--id 10-my-task] [--status todo] [--priority medium] [--column backlog] [--board <path>]',
     '  task_add Текст задачи без параметра title',
     '  task_add --board ./my-board --set title="Fix bug" --set status=in_progress --set priority=critical',
     '',
@@ -618,7 +618,10 @@ async function main() {
   const boardDir = path.resolve(args.values.board || args.values.dir || process.cwd());
   const projectDir = boardDir;
   loadDotEnv(projectDir);
-  const schemaPath = path.resolve(projectDir, args.values.schema || 'task.schema.yml');
+  const schemaPath = path.resolve(
+    projectDir,
+    args.values.schema || 'task.schema.yaml'
+  );
   const targetDir = path.resolve(projectDir, args.values.tasks || args.values.file || 'tasks');
   const argsForTask = {
     ...args,

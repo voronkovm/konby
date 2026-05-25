@@ -59,8 +59,8 @@ resolve_preset_dir() {
   local preset_name="$1"
   local preset_dir="$KONBY_HOME/presets/$preset_name"
   [[ -d "$preset_dir" ]] || err "Preset not found: $preset_name ($preset_dir)"
-  [[ -f "$preset_dir/dispatch.yml" ]] || err "Preset $preset_name missing dispatch.yml"
-  [[ -f "$preset_dir/task.schema.yml" ]] || err "Preset $preset_name missing task.schema.yml"
+  [[ -f "$preset_dir/dispatch.yaml" ]] || err "Preset $preset_name missing dispatch.yaml"
+  [[ -f "$preset_dir/task.schema.yaml" ]] || err "Preset $preset_name missing task.schema.yaml"
   [[ -d "$preset_dir/agents" ]] || err "Preset $preset_name missing agents/ directory"
   echo "$preset_dir"
 }
@@ -128,7 +128,7 @@ main() {
   mkdir -p "$target_dir/tasks" "$target_dir/transcripts"
   echo "Ensured dirs: tasks/ transcripts/"
   if [[ -n "$workspace_path" ]]; then
-    set_workspace_default "$target_dir/task.schema.yml" "$workspace_path"
+    set_workspace_default "$target_dir/task.schema.yaml" "$workspace_path"
   fi
 
   echo "Board initialized in: $target_dir (preset: $preset_name)"

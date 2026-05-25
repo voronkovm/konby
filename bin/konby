@@ -21,12 +21,12 @@ Usage steps:
     `konby board new <path> [--preset <name>] [--workspace <path>] [--force]`
 
   2. Adjust rules if needed:
-    - board structure and dispatching rules in <path>/dispatch.yml
-    - agents roles in<path>/agents/*.yml 
+    - board structure and dispatching rules in <path>/dispatch.yaml
+    - agents roles in<path>/agents/*.yaml 
 
   3. Add a task to the board (stored in <path>/tasks/*.yml):
     `konby task add --title "..." [--board <path>]`
-    `konby task move <task-file> [--stage <stage>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]`
+    `konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]`
     `konby task comment <task-file> "<comment>"`
 
   4. Run dispatcher continuously in background loop:
@@ -38,18 +38,18 @@ Usage steps:
 Additional commands:
   konby help
     This help message.
-  konby task move <task-file> [--stage <stage>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]
+  konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"]
     Move/update task fields and optionally append a comment.
   konby task comment <task-file> "<comment>"
     Append a comment to the task.
-  konby session new --agent <agent> --task <task-file> [--board <path>]
+  konby session new --agent <agent-file> --task <task-file> [--board <path>]
     Manually start a tmux agent session for one task.
   konby dispatch [--board <path>]
-    Nudge dispatcher once to apply dispatch.yml rules, move tasks, and trigger agent sessions.
+    Nudge dispatcher once to apply dispatch.yaml rules, move tasks, and trigger agent sessions.
 
 Examples:
   konby task add --title "Add OAuth login" --board ./my-board
-  konby task move ./my-board/tasks/10-login.yml --stage in_progress --status in_progress --assignee coder --comment "Picked up for implementation"
+  konby task move ./my-board/tasks/10-login.yml --column in_progress --status in_progress --assignee coder --comment "Picked up for implementation"
   konby task comment ./my-board/tasks/10-login.yml "Need clarification on acceptance criteria"
   konby dispatchd --log-file /tmp/konby-dispatchd.log --board ./my-board
 USAGE

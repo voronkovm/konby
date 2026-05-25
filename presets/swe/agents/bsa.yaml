@@ -31,7 +31,4 @@ role: |
   [Then, run UAT tests and iterate on the code until all related tests pass]
   ```
 
-success_status: "review"
-inprogress_status: "in_progress"
-failure_status: "blocked"
-cli: "ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CONFIG_DIR=~/.claude1 claude --dangerously-skip-permissions"
+cli: "codex --no-alt-screen --ask-for-approval never --search"

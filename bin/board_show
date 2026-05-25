@@ -2,8 +2,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 function parseScalar(value) {
+  if (value.startsWith('[') && value.endsWith(']')) {
+    const inner = value.slice(1, -1).trim();
+    if (!inner) return [];
+    return inner.split(',').map((item) => parseScalar(item.trim()));
+  }
   if (value === 'true') return true;
   if (value === 'false') return false;
   if (value === 'null') return null;
@@ -132,12 +138,12 @@ function saveYaml(filePath, obj) {
 }
 
 function locateDispatch(projectDir) {
-  const candidates = ['displatch.yml', 'dispatch.yml'];
+  const candidates = ['dispatch.yaml'];
   for (const name of candidates) {
     const full = path.join(projectDir, name);
     if (fs.existsSync(full)) return full;
   }
-  throw new Error('Neither displatch.yml nor dispatch.yml exists');
+  throw new Error('dispatch.yaml does not exist');
 }
 
 function readTasks(tasksDir) {
@@ -153,7 +159,7 @@ function readTasks(tasksDir) {
         data,
         id: data.id || file.replace(/\.ya?ml$/i, ''),
         title: data.title || '',
-        stage: data.stage || 'backlog',
+        column: data.column || data.stage || 'backlog',
         status: data.status || 'todo',
         assignee: data.assignee || '-',
       };
@@ -185,15 +191,13 @@ function taskLabel(task) {
 }
 
 function buildTasksByColumn(columns, tasks) {
-  const stageToColumn = new Map();
-  for (const col of columns) for (const stage of col.stages || []) stageToColumn.set(stage, col.name);
-
   const tasksByColumn = new Map(columns.map((c) => [c.name, []]));
   const unknown = [];
   for (const task of tasks) {
-    const col = stageToColumn.get(task.stage);
+    const col = task.column;
     if (!col) unknown.push(task);
-    else tasksByColumn.get(col).push(task);
+    else if (tasksByColumn.has(col)) tasksByColumn.get(col).push(task);
+    else unknown.push(task);
   }
   if (unknown.length > 0) {
     if (!tasksByColumn.has('unmapped')) tasksByColumn.set('unmapped', []);
@@ -215,7 +219,7 @@ function loadBoard(projectDir) {
 
 function visibleColumns(state) {
   const cols = [...state.columns];
-  if (state.tasksByColumn.has('unmapped')) cols.push({ name: 'unmapped', wip_limit: '-', stages: [] });
+  if (state.tasksByColumn.has('unmapped')) cols.push({ name: 'unmapped', wip_limit: '-' });
   return cols;
 }
 
@@ -260,7 +264,8 @@ function renderBoard(stateRef) {
 
   const header = `KANBAN  ${new Date().toLocaleString()}  config=${path.basename(state.dispatchFile)}  (Ctrl+C to quit)`;
   const lines = [truncate(header, totalWidth)];
-  lines.push('Hotkeys: a - add new task | m - move task | x - archive task | arrows - navigate');
+  lines.push('Hotkeys: a - add new task |  | d - dispatch once | arrows - select task');
+  lines.push('Hotkeys for a task: m - move | t - open tmux | x - archive');
   lines.push('');
 
   const colLines = cols.map((col, colIndex) => {
@@ -274,8 +279,7 @@ function renderBoard(stateRef) {
       const selected = colIndex === stateRef.selectedCol && taskIndex === stateRef.selectedTask;
       const taskLines = [
         ...wrapText(taskLabel(task), colWidth),
-        truncate(`@${task.assignee}`, colWidth),
-        truncate(`${task.stage}/${task.status}`, colWidth),
+        truncate(`@${task.assignee} / ${task.status}`, colWidth),
       ];
       for (let i = 0; i < taskLines.length; i += 1) {
         const line = taskLines[i];
@@ -303,7 +307,7 @@ function renderBoard(stateRef) {
     lines.push('');
     lines.push('Move task: (↑/↓ switch field, ←/→ select value, Enter save, Esc cancel)');
     const marker = (field) => (stateRef.moveField === field ? '>' : ' ');
-    lines.push(`${marker('stage')} stage: ${stateRef.moveDraft.stage}`);
+    lines.push(`${marker('column')} column: ${stateRef.moveDraft.column}`);
     lines.push(`${marker('status')} status: ${stateRef.moveDraft.status}`);
     lines.push(`${marker('assignee')} assignee: ${stateRef.moveDraft.assignee}`);
   }
@@ -324,7 +328,7 @@ function renderTaskDetails(stateRef) {
   const lines = [];
   const header = `TASK  ${task ? task.file : '(not found)'}  (Esc to board)`;
   lines.push(truncate(header, totalWidth));
-  lines.push('Hotkeys: a - add new task | m - move task | x - archive task | c - comment | arrows/mouse wheel - scroll');
+  lines.push('Hotkeys for a task: m - move | t - open tmux | x - archive');
   lines.push('');
 
   if (!task) {
@@ -355,7 +359,7 @@ function renderTaskDetails(stateRef) {
 
 function snapshotInputs(projectDir) {
   const parts = [];
-  const dispatchCandidates = ['displatch.yml', 'dispatch.yml'].map((f) => path.join(projectDir, f));
+  const dispatchCandidates = ['dispatch.yaml'].map((f) => path.join(projectDir, f));
   for (const file of dispatchCandidates) {
     try {
       const st = fs.statSync(file);
@@ -418,7 +422,7 @@ function moveSelection(stateRef, dx, dy) {
 
 function updateTaskFile(task, updates) {
   const data = loadYaml(task.path);
-  if (updates.stage !== undefined) data.stage = updates.stage;
+  if (updates.column !== undefined) data.column = updates.column;
   if (updates.status !== undefined) data.status = updates.status;
   if (updates.assignee !== undefined) data.assignee = updates.assignee;
   data.updated_at = new Date().toISOString();
@@ -472,7 +476,7 @@ function addTask(projectDir, title) {
   const data = {
     title,
     type: 'task',
-    stage: 'backlog',
+    column: 'backlog',
     status: 'todo',
     priority: 'medium',
     created_at: now,
@@ -491,19 +495,19 @@ function startMovePopup(stateRef) {
     return;
   }
   stateRef.mode = 'move';
-  stateRef.moveField = 'stage';
+  stateRef.moveField = 'column';
   stateRef.moveDraft = {
-    stage: task.stage,
+    column: task.column,
     status: task.status,
     assignee: task.assignee,
   };
   stateRef.moveOptions = buildMoveOptions(stateRef);
   stateRef.moveIndex = {
-    stage: Math.max(0, stateRef.moveOptions.stage.indexOf(stateRef.moveDraft.stage)),
+    column: Math.max(0, stateRef.moveOptions.column.indexOf(stateRef.moveDraft.column)),
     status: Math.max(0, stateRef.moveOptions.status.indexOf(stateRef.moveDraft.status)),
     assignee: Math.max(0, stateRef.moveOptions.assignee.indexOf(stateRef.moveDraft.assignee)),
   };
-  for (const field of ['stage', 'status', 'assignee']) {
+  for (const field of ['column', 'status', 'assignee']) {
     if (!stateRef.moveOptions[field][stateRef.moveIndex[field]] && stateRef.moveOptions[field].length > 0) {
       stateRef.moveIndex[field] = 0;
     }
@@ -543,7 +547,7 @@ function readAgentNames(projectDir) {
 }
 
 function readSchemaEnum(projectDir, propertyName) {
-  const schemaPath = path.join(projectDir, 'task.schema.yml');
+  const schemaPath = path.join(projectDir, 'task.schema.yaml');
   try {
     const schema = loadYaml(schemaPath);
     const values = schema
@@ -559,18 +563,16 @@ function readSchemaEnum(projectDir, propertyName) {
 }
 
 function buildMoveOptions(stateRef) {
-  const schemaStages = readSchemaEnum(stateRef.projectDir, 'stage');
+  const schemaColumns = readSchemaEnum(stateRef.projectDir, 'column');
   const schemaStatuses = readSchemaEnum(stateRef.projectDir, 'status');
-  const boardStages = uniqInOrder(
-    stateRef.board.columns.flatMap((col) => (Array.isArray(col.stages) ? col.stages : []))
-  );
-  const taskStages = uniqInOrder(stateRef.board.tasks.map((t) => t.stage));
+  const boardColumns = uniqInOrder(stateRef.board.columns.map((col) => col.name));
+  const taskColumns = uniqInOrder(stateRef.board.tasks.map((t) => t.column));
   const taskStatuses = uniqInOrder(stateRef.board.tasks.map((t) => t.status));
   const taskAssignees = uniqInOrder(stateRef.board.tasks.map((t) => t.assignee));
   const agentsFromDir = uniqInOrder(readAgentNames(stateRef.projectDir));
   const assignees = uniqInOrder(['-', ...agentsFromDir, ...taskAssignees]);
   return {
-    stage: uniqInOrder([...schemaStages, ...boardStages, ...taskStages]),
+    column: uniqInOrder([...schemaColumns, ...boardColumns, ...taskColumns]),
     status: (() => {
       const values = uniqInOrder([...schemaStatuses, ...taskStatuses]);
       return values.length > 0 ? values : ['todo', 'in_progress', 'blocked', 'review', 'done'];
@@ -586,11 +588,11 @@ function handleMoveInput(stateRef, key) {
     return;
   }
   if (key === '\u001b[A') {
-    stateRef.moveField = stateRef.moveField === 'stage' ? 'assignee' : stateRef.moveField === 'status' ? 'stage' : 'status';
+    stateRef.moveField = stateRef.moveField === 'column' ? 'assignee' : stateRef.moveField === 'status' ? 'column' : 'status';
     return;
   }
   if (key === '\u001b[B') {
-    stateRef.moveField = stateRef.moveField === 'stage' ? 'status' : stateRef.moveField === 'status' ? 'assignee' : 'stage';
+    stateRef.moveField = stateRef.moveField === 'column' ? 'status' : stateRef.moveField === 'status' ? 'assignee' : 'column';
     return;
   }
   if (key === '\u001b[D') {
@@ -710,6 +712,74 @@ function parseMouseWheelDelta(key) {
   return 0;
 }
 
+function taskSlugFromFile(fileName) {
+  return String(fileName || '').replace(/\.ya?ml$/i, '');
+}
+
+function sessionIdForTask(task) {
+  const agent = String(task.assignee || '').trim();
+  const column = String(task.column || 'backlog').trim() || 'backlog';
+  const taskSlug = taskSlugFromFile(task.file);
+  return `${agent}__${column}___${taskSlug}`;
+}
+
+function tmuxSessionExists(sessionId) {
+  const out = spawnSync('tmux', ['has-session', '-t', sessionId], { encoding: 'utf8' });
+  return out.status === 0;
+}
+
+function openTaskTmux(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  const agent = String(task.assignee || '').trim();
+  if (!agent || agent === '-') {
+    setMessage(stateRef, 'Task has no assignee agent');
+    return;
+  }
+  const sessionId = sessionIdForTask(task);
+  if (!tmuxSessionExists(sessionId)) {
+    setMessage(stateRef, `tmux session not found for current column: ${sessionId}`);
+    return;
+  }
+
+  process.stdin.setRawMode(false);
+  process.stdout.write('\x1Bc');
+  process.stdout.write(`Opening tmux session: ${sessionId}\n`);
+  spawnSync('tmux', ['bind-key', '-n', 'C-]', 'detach-client'], { encoding: 'utf8' });
+  spawnSync('tmux', ['set-option', '-t', sessionId, 'status-right', 'Back to kanban board: Ctrl+]'], { encoding: 'utf8' });
+  const out = spawnSync('tmux', ['attach-session', '-t', sessionId], { stdio: 'inherit' });
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+
+  if (out.status !== 0) {
+    const err = (out.error && out.error.message) ? out.error.message : `exit=${out.status}`;
+    setMessage(stateRef, `Failed to open tmux: ${err}`);
+    return;
+  }
+  setMessage(stateRef, `Returned from tmux: ${sessionId}`);
+}
+
+function runDispatchOnce(stateRef) {
+  const dispatchBin = path.join(__dirname, 'dispatch');
+  const out = spawnSync(dispatchBin, ['--board', stateRef.projectDir], { encoding: 'utf8' });
+  const stdout = String(out.stdout || '').trim();
+  const stderr = String(out.stderr || '').trim();
+  const output = stdout || stderr;
+
+  if (out.status !== 0) {
+    setMessage(stateRef, output ? `Dispatch failed: ${output}` : `Dispatch failed (exit=${out.status})`);
+    return;
+  }
+  if (output) {
+    setMessage(stateRef, output);
+    return;
+  }
+  setMessage(stateRef, 'Dispatch finished');
+}
+
 function main() {
   const argv = process.argv.slice(2);
   let projectDir = process.cwd();
@@ -745,10 +815,10 @@ function main() {
     selectedCol: 0,
     selectedTask: 0,
     mode: 'normal',
-    moveField: 'stage',
-    moveDraft: { stage: '', status: '', assignee: '' },
-    moveOptions: { stage: [], status: [], assignee: [] },
-    moveIndex: { stage: 0, status: 0, assignee: 0 },
+    moveField: 'column',
+    moveDraft: { column: '', status: '', assignee: '' },
+    moveOptions: { column: [], status: [], assignee: [] },
+    moveIndex: { column: 0, status: 0, assignee: 0 },
     addBuffer: '',
     commentBuffer: '',
     detailsScroll: 0,
@@ -856,6 +926,10 @@ function main() {
         } else {
           setMessage(stateRef, 'No task selected');
         }
+      } else if (key === 't') {
+        openTaskTmux(stateRef);
+      } else if (key === 'd') {
+        runDispatchOnce(stateRef);
       }
       redraw(stateRef);
       return;
@@ -879,6 +953,10 @@ function main() {
       } else {
         setMessage(stateRef, 'No task selected');
       }
+    } else if (key === 't') {
+      openTaskTmux(stateRef);
+    } else if (key === 'd') {
+      runDispatchOnce(stateRef);
     } else if (key === '\r') {
       startDetails(stateRef);
     }
