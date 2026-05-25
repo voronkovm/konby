@@ -249,7 +249,7 @@ function closeTaskSessionsOnAssigneeChange(projectDir, taskFile) {
 }
 
 function usage() {
-  process.stdout.write('Usage: task_move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--transcript <path>]\n');
+  process.stdout.write('Usage: task_move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--transcript <path>] [--author <slug>]\n');
 }
 
 function main() {
@@ -265,6 +265,7 @@ function main() {
   let assignee;
   let comment;
   let transcript;
+  let author;
 
   for (let i = 1; i < argv.length; i += 1) {
     const token = argv[i];
@@ -304,6 +305,12 @@ function main() {
       i += 1;
       continue;
     }
+    if (token === '--author') {
+      if (!argv[i + 1]) throw new Error('Missing value after --author');
+      author = argv[i + 1];
+      i += 1;
+      continue;
+    }
     throw new Error(`Unknown argument: ${token}`);
   }
 
@@ -316,23 +323,33 @@ function main() {
   const projectDir = guessProjectDir(fullTaskPath);
 
   const data = loadYaml(fullTaskPath);
+  const commentAuthor = String(author === undefined ? 'user' : author).trim();
+  if (!commentAuthor) throw new Error('--author cannot be empty');
+  const prevColumn = String(data.column || '').trim();
+  const prevStatus = String(data.status || '').trim();
   const prevAssignee = String(data.assignee || '').trim();
   if (column !== undefined) data.column = column;
   if (status !== undefined) data.status = status;
   if (assignee !== undefined) data.assignee = assignee;
-  if (comment !== undefined || transcript !== undefined) {
-    const commentText = comment === undefined ? '' : String(comment).trim();
-    const transcriptText = transcript === undefined ? '' : String(transcript).trim();
-    if (comment !== undefined && !commentText) throw new Error('--comment cannot be empty');
-    if (transcript !== undefined && !transcriptText) throw new Error('--transcript cannot be empty');
-    const statusForComment = String(data.status || status || '').trim() || 'unknown';
-    const text = commentText
-      ? `status: ${statusForComment}, ${commentText}`
-      : `status: ${statusForComment}`;
+  const nextColumn = String(data.column || '').trim();
+  const nextStatus = String(data.status || '').trim();
+  const columnChanged = prevColumn !== nextColumn;
+  const statusChanged = prevStatus !== nextStatus;
+  const commentText = comment === undefined ? '' : String(comment).trim();
+  const transcriptText = transcript === undefined ? '' : String(transcript).trim();
+  if (comment !== undefined && !commentText) throw new Error('--comment cannot be empty');
+  if (transcript !== undefined && !transcriptText) throw new Error('--transcript cannot be empty');
+
+  if (columnChanged || statusChanged || comment !== undefined || transcript !== undefined) {
+    const parts = [];
+    if (statusChanged) parts.push(`status: ${prevStatus || '-'} -> ${nextStatus || '-'}`);
+    if (columnChanged) parts.push(`column: ${prevColumn || '-'} -> ${nextColumn || '-'}`);
+    if (commentText) parts.push(`comment: ${commentText}`);
+    const text = parts.join(', ');
     if (!Array.isArray(data.comments)) data.comments = [];
     const nextComment = {
-      author: 'user',
-      text,
+      author: commentAuthor,
+      text: text || 'task updated',
       created_at: new Date().toISOString(),
     };
     if (transcriptText) nextComment.transcript = transcriptText;

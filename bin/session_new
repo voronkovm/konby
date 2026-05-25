@@ -258,9 +258,9 @@ ${task_text}
 
 Completion protocol:
 - For success, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${success_status}\" --comment \"<short summary>\" --transcript \"${transcript_path}\"
+konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${success_status}\" --comment \"<short summary>\" --transcript \"${transcript_path}\" --author \"${agent_slug}\"
 - For failure/blocker, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\" --transcript \"${transcript_path}\"
+konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\" --transcript \"${transcript_path}\" --author \"${agent_slug}\"
 - If additional input from the user is required to proceed, move the task to \"${failure_status}\" and explain what input is needed in the comment."
 
 tmux new-session -d -s "$session_id" -c "$workspace_dir"

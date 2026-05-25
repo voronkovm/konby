@@ -103,6 +103,7 @@ function applyStatusUpdateViaTaskMove(projectDir, taskPath, status, reasonText, 
     status,
     comment,
     transcript: transcriptRelPath,
+    author: 'dispatcher',
   });
 }
 
@@ -251,6 +252,9 @@ function runTaskMove(projectDir, taskPath, updates) {
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'column')) args.push('--column', String(updates.column));
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'status')) args.push('--status', String(updates.status));
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'assignee')) args.push('--assignee', String(updates.assignee));
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'comment')) args.push('--comment', String(updates.comment));
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'transcript')) args.push('--transcript', String(updates.transcript));
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'author')) args.push('--author', String(updates.author));
   return spawnSync(cmd, args, {
     cwd: projectDir,
     encoding: 'utf8',
@@ -447,6 +451,29 @@ function transcriptForLlm(fullText, edgeLines = 150) {
   return `${head}\n\n... [${lines.length - edgeLines * 2} lines omitted] ...\n\n${tail}`.trimEnd();
 }
 
+function lastCommentMeta(taskData) {
+  const comments = Array.isArray(taskData?.comments) ? taskData.comments : [];
+  if (comments.length === 0) return { author: '', timestampMs: null };
+  const dated = comments
+    .map((comment, idx) => ({
+      idx,
+      author: String(comment?.author || '').trim(),
+      ts: Date.parse(String(comment?.created_at || '')),
+    }))
+    .filter((entry) => entry.author);
+  if (dated.length === 0) return { author: '', timestampMs: null };
+  const hasValidDates = dated.some((entry) => Number.isFinite(entry.ts));
+  if (!hasValidDates) return { author: dated[dated.length - 1].author, timestampMs: null };
+  dated.sort((a, b) => {
+    const ta = Number.isFinite(a.ts) ? a.ts : -Infinity;
+    const tb = Number.isFinite(b.ts) ? b.ts : -Infinity;
+    if (ta !== tb) return ta - tb;
+    return a.idx - b.idx;
+  });
+  const last = dated[dated.length - 1];
+  return { author: last.author, timestampMs: Number.isFinite(last.ts) ? last.ts : null };
+}
+
 async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
   loadEnvFile(path.join(projectDir, '.env'));
 
@@ -503,8 +530,16 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
     }
     const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
     const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
-    const transcriptChanged = prevTranscript === null || prevTranscript !== nextTranscript;
-    if (transcriptChanged) {
+    const { author: rawLastCommentAuthor, timestampMs: lastCommentTsMs } = lastCommentMeta(item.data);
+    const isLastCommentByDispatcher = rawLastCommentAuthor.toLowerCase() === 'dispatcher';
+    const transcriptMtimeMs = fs.existsSync(transcriptAbsPath) ? fs.statSync(transcriptAbsPath).mtimeMs : null;
+    const transcriptNotNewerThanLastComment = Number.isFinite(transcriptMtimeMs)
+      && Number.isFinite(lastCommentTsMs)
+      && transcriptMtimeMs <= lastCommentTsMs;
+    const shouldRefreshWithoutChange = !isLastCommentByDispatcher && transcriptNotNewerThanLastComment;
+    const transcriptContentChanged = prevTranscript === null || prevTranscript !== nextTranscript;
+    const transcriptChanged = !shouldRefreshWithoutChange && transcriptContentChanged;
+    if (transcriptContentChanged) {
       fs.writeFileSync(transcriptAbsPath, nextTranscript, 'utf8');
     }
     if (transcriptChanged) {
@@ -730,6 +765,7 @@ async function main() {
           column: nextTask.column,
           status: nextTask.status,
           assignee: nextTask.assignee,
+          author: 'dispatcher',
         });
         if (moveResult.status !== 0) {
           taskMoveErrors.push({
