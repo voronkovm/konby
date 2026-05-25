@@ -229,19 +229,23 @@ function formatYaml(value, indent = 0) {
 }
 
 function orderObjectBySchema(obj, schema) {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  if (!schema || !obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) {
+    if (!schema.items) return obj.map((item) => orderObjectBySchema(item, null));
+    return obj.map((item) => orderObjectBySchema(item, schema.items));
+  }
   const props = (schema && schema.properties) || {};
   const ordered = {};
 
   for (const key of Object.keys(props)) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      ordered[key] = obj[key];
+      ordered[key] = orderObjectBySchema(obj[key], props[key]);
     }
   }
 
   for (const key of Object.keys(obj)) {
     if (!Object.prototype.hasOwnProperty.call(ordered, key)) {
-      ordered[key] = obj[key];
+      ordered[key] = orderObjectBySchema(obj[key], props[key] || null);
     }
   }
 

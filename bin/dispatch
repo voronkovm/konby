@@ -90,48 +90,20 @@ function parseYamlSimple(input) {
   return root;
 }
 
-function yamlScalar(v) {
-  if (v === null) return 'null';
-  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
-  if (typeof v === 'string' && /^[A-Za-z0-9_./:*+-]+$/.test(v)) return v;
-  return JSON.stringify(v);
-}
-
-function formatYaml(value, indent = 0) {
-  const sp = ' '.repeat(indent);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return `${sp}[]`;
-    return value
-      .map((item) => {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) return `${sp}- ${yamlScalar(item)}`;
-        const nested = formatYaml(item, indent + 2).split('\n');
-        return `${sp}- ${nested[0].trimStart()}\n${nested.slice(1).join('\n')}`;
-      })
-      .join('\n');
-  }
-
-  const lines = [];
-  for (const [k, v] of Object.entries(value)) {
-    if (Array.isArray(v)) {
-      if (v.length === 0) lines.push(`${sp}${k}: []`);
-      else lines.push(`${sp}${k}:\n${formatYaml(v, indent + 2)}`);
-      continue;
-    }
-    if (v && typeof v === 'object') {
-      lines.push(`${sp}${k}:\n${formatYaml(v, indent + 2)}`);
-      continue;
-    }
-    lines.push(`${sp}${k}: ${yamlScalar(v)}`);
-  }
-  return lines.join('\n');
-}
-
 function loadYaml(filePath) {
   return parseYamlSimple(fs.readFileSync(filePath, 'utf8'));
 }
 
-function saveYaml(filePath, obj) {
-  fs.writeFileSync(filePath, `${formatYaml(obj)}\n`, 'utf8');
+function applyStatusUpdateViaTaskMove(projectDir, taskPath, status, reasonText, transcriptRelPath) {
+  const reason = String(reasonText || '').trim();
+  const comment = reason
+    ? `status_update: status=${status}; reason=${reason}`
+    : `status_update: status=${status}`;
+  return runTaskMove(projectDir, taskPath, {
+    status,
+    comment,
+    transcript: transcriptRelPath,
+  });
 }
 
 function readStatusDefaults(dispatchCfg) {
@@ -381,20 +353,6 @@ function closeTaskSessionsOnAssigneeChange(projectDir, taskFile) {
   return { found: sessions.length, closed, transcriptUpdated };
 }
 
-function addDispatcherStatusComment(task, nextStatus, reasonText, transcriptRelPath, atIso) {
-  if (!Array.isArray(task.comments)) task.comments = [];
-  const reason = String(reasonText || '').trim();
-  const text = reason
-    ? `status_update: status=${nextStatus}; reason=${reason}`
-    : `status_update: status=${nextStatus}`;
-  task.comments.push({
-    author: 'dispatcher',
-    text,
-    transcript: transcriptRelPath,
-    created_at: atIso,
-  });
-}
-
 function loadEnvFile(envPath) {
   if (!fs.existsSync(envPath)) return;
   const txt = fs.readFileSync(envPath, 'utf8');
@@ -523,11 +481,22 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
     const cap = captureTmux(sessionId, 50);
     if (!cap.ok) {
       if (item.data.status !== failureStatus) {
-        const nowIso = new Date().toISOString();
-        item.data.status = failureStatus;
-        item.data.updated_at = nowIso;
-        addDispatcherStatusComment(item.data, failureStatus, `tmux_unavailable:${cap.error}`, transcriptRelPath, nowIso);
-        saveYaml(item.file, item.data);
+        const moveResult = applyStatusUpdateViaTaskMove(
+          projectDir,
+          item.file,
+          failureStatus,
+          `tmux_unavailable:${cap.error}`,
+          transcriptRelPath,
+        );
+        if (moveResult.status !== 0) {
+          updates.push({
+            file: path.basename(item.file),
+            result: 'failure',
+            reason: `task_move_error:${(`${moveResult.stdout || ''}${moveResult.stderr || ''}`.trim() || 'task_move failed')}`,
+          });
+          continue;
+        }
+        item.data = loadYaml(item.file);
       }
       updates.push({ file: path.basename(item.file), result: 'failure', reason: `tmux_unavailable:${cap.error}` });
       continue;
@@ -540,11 +509,22 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
     }
     if (transcriptChanged) {
       if (item.data.status !== inprogressStatus) {
-        const nowIso = new Date().toISOString();
-        item.data.status = inprogressStatus;
-        item.data.updated_at = nowIso;
-        addDispatcherStatusComment(item.data, inprogressStatus, 'terminal_changed', transcriptRelPath, nowIso);
-        saveYaml(item.file, item.data);
+        const moveResult = applyStatusUpdateViaTaskMove(
+          projectDir,
+          item.file,
+          inprogressStatus,
+          'terminal_changed',
+          transcriptRelPath,
+        );
+        if (moveResult.status !== 0) {
+          updates.push({
+            file: path.basename(item.file),
+            result: inprogressStatus,
+            reason: `task_move_error:${(`${moveResult.stdout || ''}${moveResult.stderr || ''}`.trim() || 'task_move failed')}`,
+          });
+          continue;
+        }
+        item.data = loadYaml(item.file);
       }
       updates.push({
         file: path.basename(item.file),
@@ -589,17 +569,39 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
     }
 
     if (outcome === 'success' && item.data.status !== successStatus) {
-      const nowIso = new Date().toISOString();
-      item.data.status = successStatus;
-      item.data.updated_at = nowIso;
-      addDispatcherStatusComment(item.data, successStatus, outcomeReason, transcriptRelPath, nowIso);
-      saveYaml(item.file, item.data);
+      const moveResult = applyStatusUpdateViaTaskMove(
+        projectDir,
+        item.file,
+        successStatus,
+        outcomeReason,
+        transcriptRelPath,
+      );
+      if (moveResult.status !== 0) {
+        updates.push({
+          file: path.basename(item.file),
+          result: 'failure',
+          reason: `task_move_error:${(`${moveResult.stdout || ''}${moveResult.stderr || ''}`.trim() || 'task_move failed')}`,
+        });
+        continue;
+      }
+      item.data = loadYaml(item.file);
     } else if (outcome === 'failure' && item.data.status !== failureStatus) {
-      const nowIso = new Date().toISOString();
-      item.data.status = failureStatus;
-      item.data.updated_at = nowIso;
-      addDispatcherStatusComment(item.data, failureStatus, outcomeReason, transcriptRelPath, nowIso);
-      saveYaml(item.file, item.data);
+      const moveResult = applyStatusUpdateViaTaskMove(
+        projectDir,
+        item.file,
+        failureStatus,
+        outcomeReason,
+        transcriptRelPath,
+      );
+      if (moveResult.status !== 0) {
+        updates.push({
+          file: path.basename(item.file),
+          result: 'failure',
+          reason: `task_move_error:${(`${moveResult.stdout || ''}${moveResult.stderr || ''}`.trim() || 'task_move failed')}`,
+        });
+        continue;
+      }
+      item.data = loadYaml(item.file);
     }
 
     if (!updates.find((u) => u.file === path.basename(item.file) && u.result === 'failure')) {
