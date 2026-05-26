@@ -279,9 +279,9 @@ if [[ "$workspace_type" == "worktree" ]]; then
     mkdir -p "$(dirname "$task_worktree_dir")"
     if [[ ! -d "$task_worktree_dir" ]]; then
       if git -C "$repo_root" show-ref --verify --quiet "refs/heads/${task_branch}"; then
-        git -C "$repo_root" worktree add "$task_worktree_dir" "$task_branch" >/dev/null
+        git -C "$repo_root" worktree add -f "$task_worktree_dir" "$task_branch" >/dev/null
       else
-        git -C "$repo_root" worktree add -b "$task_branch" "$task_worktree_dir" >/dev/null
+        git -C "$repo_root" worktree add -f -b "$task_branch" "$task_worktree_dir" >/dev/null
       fi
     fi
     workspace_dir="$task_worktree_dir"
@@ -291,6 +291,10 @@ fi
 [[ -d "$workspace_dir" ]] || err "workspace_dir does not exist or is not a directory: $workspace_dir"
 task_abs_path="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
 
+# IMPORTANT SESSION ID INVARIANT:
+# Keep this exact format in sync with bin/dispatch and bin/board_show.
+# "<agent>__<column>___<task-slug>__<UTC timestamp>", e.g.:
+# "bsa__refinement___1-write-hello-world-py__20260526T050141Z"
 session_id="${agent_slug}__${column}___${task_slug}"
 session_ts="$session_ts_arg"
 if [[ -z "$session_ts" ]]; then

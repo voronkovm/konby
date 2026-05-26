@@ -773,6 +773,11 @@ function tmuxSessionExists(sessionId) {
 function listMatchingTmuxSessions(sessionIdPrefix) {
   const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
   if (out.status !== 0) return [];
+  // IMPORTANT SESSION ID INVARIANT:
+  // Must stay in sync with bin/session_new and bin/dispatch.
+  // Strict format: "<agent>__<column>___<task-slug>__YYYYMMDDTHHMMSSZ".
+  const escapedPrefix = sessionIdPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fullPattern = new RegExp(`^${escapedPrefix}__\\d{8}T\\d{6}Z$`);
   const prefix = `${sessionIdPrefix}__`;
   return String(out.stdout || '')
     .split(/\r?\n/)
@@ -783,7 +788,7 @@ function listMatchingTmuxSessions(sessionIdPrefix) {
       const created = Number(createdRaw || 0);
       return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
     })
-    .filter((entry) => entry.name === sessionIdPrefix || entry.name.startsWith(prefix))
+    .filter((entry) => fullPattern.test(entry.name) || entry.name.startsWith(prefix))
     .sort((a, b) => b.created - a.created);
 }
 

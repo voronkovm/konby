@@ -298,7 +298,9 @@ function listSessionsForTask(taskFile, agent) {
   if (out.status !== 0) return [];
 
   const escapedTaskSlug = taskSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Session id format is strict: "<agent>__<column>___<task-slug>__<timestamp>".
+  // IMPORTANT SESSION ID INVARIANT:
+  // Must stay in sync with bin/session_new and bin/board_show.
+  // Strict format: "<agent>__<column>___<task-slug>__YYYYMMDDTHHMMSSZ".
   const taskPattern = new RegExp(`___${escapedTaskSlug}__\\d{8}T\\d{6}Z$`);
   const prefix = String(agent || '').trim() ? `${agent}__` : '';
   return String(out.stdout || '')
@@ -775,6 +777,9 @@ async function main() {
         const fromColumn = item.data.column || 'backlog';
         const { thenCfg } = extractWhenThen(rule);
         const toColumn = thenCfg.column || fromColumn;
+        const launchAgent = (thenCfg.assignee && thenCfg.assignee !== '-')
+          ? thenCfg.assignee
+          : '';
 
         if (toColumn && !canEnterColumn(toColumn, columnsByName, counts)) {
           skipped.push({ file: path.basename(item.file), reason: `WIP limit reached in column ${toColumn}` });
@@ -783,6 +788,23 @@ async function main() {
 
         const nextTask = { ...item.data };
         applyRule(nextTask, rule, statusDefaults);
+
+        if (launchAgent) {
+          const launchStatuses = statusCfgFromThen(thenCfg, statusDefaults);
+          const sessionTs = sessionTimestampUtc();
+          const sessionId = `${sessionIdForTask(item.file, item.data, launchAgent)}__${sessionTs}`;
+          const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
+          const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
+          const result = runAgent(projectDir, launchAgent, item.file, launchStatuses, transcriptRelPath, sessionTs);
+          launched.push({
+            file: path.basename(item.file),
+            agent: launchAgent,
+            ok: result.status === 0,
+            output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
+          });
+          if (result.status !== 0) continue;
+        }
+
         const moveResult = runTaskMove(projectDir, item.file, {
           column: nextTask.column,
           status: nextTask.status,
@@ -801,24 +823,6 @@ async function main() {
 
         if (fromColumn) counts.set(fromColumn, Math.max(0, (counts.get(fromColumn) || 0) - 1));
         if (toColumn) counts.set(toColumn, (counts.get(toColumn) || 0) + 1);
-
-        const launchAgent = (thenCfg.assignee && thenCfg.assignee !== '-')
-          ? thenCfg.assignee
-          : '';
-        if (launchAgent) {
-          const launchStatuses = statusCfgFromThen(thenCfg, statusDefaults);
-          const sessionTs = sessionTimestampUtc();
-          const sessionId = `${sessionIdForTask(item.file, item.data, launchAgent)}__${sessionTs}`;
-          const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
-          const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
-          const result = runAgent(projectDir, launchAgent, item.file, launchStatuses, transcriptRelPath, sessionTs);
-          launched.push({
-            file: path.basename(item.file),
-            agent: launchAgent,
-            ok: result.status === 0,
-            output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
-          });
-        }
       }
     }
 
