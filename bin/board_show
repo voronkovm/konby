@@ -763,9 +763,8 @@ function taskSlugFromFile(fileName) {
 
 function sessionIdForTask(task) {
   const agent = String(task.assignee || '').trim();
-  const column = String(task.column || 'backlog').trim() || 'backlog';
   const taskSlug = taskSlugFromFile(task.file);
-  return `${agent}__${column}___${taskSlug}`;
+  return `${agent}__${taskSlug}`;
 }
 
 function tmuxSessionExists(sessionId) {
@@ -778,7 +777,7 @@ function listMatchingTmuxSessions(sessionIdPrefix) {
   if (out.status !== 0) return [];
   // IMPORTANT SESSION ID INVARIANT:
   // Must stay in sync with bin/session_new and bin/dispatch.
-  // Strict format: "<agent>__<column>___<task-slug>__YYYYMMDDTHHMMSSZ".
+  // Strict format: "<agent>__<task-slug>__YYYYMMDDTHHMMSSZ".
   const escapedPrefix = sessionIdPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const fullPattern = new RegExp(`^${escapedPrefix}__\\d{8}T\\d{6}Z$`);
   const prefix = `${sessionIdPrefix}__`;
@@ -814,7 +813,7 @@ function openTaskTmux(stateRef) {
     ? sessions[0].name
     : (tmuxSessionExists(sessionIdPrefix) ? sessionIdPrefix : '');
   if (!sessionId) {
-    setMessage(stateRef, `tmux session not found for current column: ${sessionIdPrefix}`);
+    setMessage(stateRef, `tmux session not found for task: ${sessionIdPrefix}`);
     return;
   }
 

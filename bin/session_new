@@ -5,7 +5,6 @@ usage() {
   cat <<'USAGE'
 Usage:
   session_new --agent <agent-file> --task <task-file> [--board <path>]
-              [--column <column>]
               [--transcript <path>] [--session-ts <UTC timestamp>]
               [--completion-column <column>]
               [--status-todo <status>] [--status-in-progress <status>]
@@ -29,7 +28,6 @@ status_in_progress_arg=""
 status_success_arg=""
 status_failure_arg=""
 completion_column_arg=""
-column_arg=""
 transcript_path_arg=""
 session_ts_arg=""
 
@@ -73,11 +71,6 @@ while [[ $# -gt 0 ]]; do
     --completion-column)
       [[ $# -ge 2 ]] || err "--completion-column requires a value"
       completion_column_arg="$2"
-      shift 2
-      ;;
-    --column)
-      [[ $# -ge 2 ]] || err "--column requires a value"
-      column_arg="$2"
       shift 2
       ;;
     --transcript)
@@ -235,16 +228,12 @@ role_text="$(read_block_scalar role "$agent_file")"
 cli_cmd="$(read_scalar cli "$agent_file")"
 [[ -n "$cli_cmd" ]] || err "Could not read cli from $agent_file"
 
-column="$column_arg"
-if [[ -z "$column" ]]; then
-  column="$(read_scalar column "$task_file")"
-fi
-if [[ -z "$column" ]]; then
-  column="backlog"
-fi
 completion_column="$completion_column_arg"
 if [[ -z "$completion_column" ]]; then
-  completion_column="$column"
+  completion_column="$(read_scalar column "$task_file")"
+fi
+if [[ -z "$completion_column" ]]; then
+  completion_column="backlog"
 fi
 task_base="$(basename "$task_file")"
 task_slug="$task_base"
@@ -320,9 +309,9 @@ task_abs_path="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
 
 # IMPORTANT SESSION ID INVARIANT:
 # Keep this exact format in sync with bin/dispatch and bin/board_show.
-# "<agent>__<column>___<task-slug>__<UTC timestamp>", e.g.:
-# "bsa__refinement___1-write-hello-world-py__20260526T050141Z"
-session_id="${agent_slug}__${column}___${task_slug}"
+# "<agent>__<task-slug>__<UTC timestamp>", e.g.:
+# "bsa__1-write-hello-world-py__20260526T050141Z"
+session_id="${agent_slug}__${task_slug}"
 session_ts="$session_ts_arg"
 if [[ -z "$session_ts" ]]; then
   session_ts="$(date -u +%Y%m%dT%H%M%SZ)"

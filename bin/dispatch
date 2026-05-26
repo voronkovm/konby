@@ -248,14 +248,13 @@ function resolveStatusCfgForTask(task, rules, defaults) {
   return best || base;
 }
 
-function runAgent(projectDir, agent, taskPath, statusCfg, transcriptPath, sessionTs, completionColumn, launchColumn) {
+function runAgent(projectDir, agent, taskPath, statusCfg, transcriptPath, sessionTs, completionColumn) {
   const cmd = path.join(__dirname, 'session_new');
   const agentFile = path.join('agents', `${agent}.yaml`);
   const args = ['--board', projectDir, '--agent', agentFile, '--task', taskPath];
   if (transcriptPath) args.push('--transcript', transcriptPath);
   if (sessionTs) args.push('--session-ts', sessionTs);
   if (completionColumn) args.push('--completion-column', completionColumn);
-  if (launchColumn) args.push('--column', launchColumn);
   if (statusCfg && statusCfg.todo) args.push('--status-todo', statusCfg.todo);
   if (statusCfg && statusCfg.in_progress) args.push('--status-in-progress', statusCfg.in_progress);
   if (statusCfg && statusCfg.success) args.push('--status-success', statusCfg.success);
@@ -287,17 +286,9 @@ function runTaskMove(projectDir, taskPath, updates) {
 }
 
 function sessionIdForTask(taskFile, task, agent) {
-  const column = task.column || 'backlog';
   const taskBase = path.basename(taskFile);
   const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
-  return `${agent}__${column}___${taskSlug}`;
-}
-
-function sessionIdForTaskAndColumn(taskFile, agent, column) {
-  const safeColumn = String(column || 'backlog').trim() || 'backlog';
-  const taskBase = path.basename(taskFile);
-  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
-  return `${agent}__${safeColumn}___${taskSlug}`;
+  return `${agent}__${taskSlug}`;
 }
 
 function sessionTimestampUtc() {
@@ -313,8 +304,8 @@ function listSessionsForTask(taskFile, agent) {
   const escapedTaskSlug = taskSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // IMPORTANT SESSION ID INVARIANT:
   // Must stay in sync with bin/session_new and bin/board_show.
-  // Strict format: "<agent>__<column>___<task-slug>__YYYYMMDDTHHMMSSZ".
-  const taskPattern = new RegExp(`___${escapedTaskSlug}__\\d{8}T\\d{6}Z$`);
+  // Strict format: "<agent>__<task-slug>__YYYYMMDDTHHMMSSZ".
+  const taskPattern = new RegExp(`__${escapedTaskSlug}__\\d{8}T\\d{6}Z$`);
   const prefix = String(agent || '').trim() ? `${agent}__` : '';
   return String(out.stdout || '')
     .split(/\r?\n/)
@@ -363,10 +354,15 @@ function sanitizePathToken(value, fallback) {
 function transcriptFileForSession(projectDir, taskFile, sessionId) {
   const taskSlug = sanitizePathToken(path.basename(taskFile).replace(/\.ya?ml$/i, ''), 'task');
   const rawSessionSlug = sanitizePathToken(sessionId || 'session', 'session');
-  const taskToken = `___${taskSlug}__`;
-  const sessionSlug = rawSessionSlug.includes(taskToken)
-    ? rawSessionSlug.replace(taskToken, '__')
-    : rawSessionSlug;
+  // Support both old and new session id formats when deriving transcript names.
+  const legacyTaskToken = `___${taskSlug}__`;
+  const taskToken = `__${taskSlug}__`;
+  let sessionSlug = rawSessionSlug;
+  if (rawSessionSlug.includes(taskToken)) {
+    sessionSlug = rawSessionSlug.replace(taskToken, '__');
+  } else if (rawSessionSlug.includes(legacyTaskToken)) {
+    sessionSlug = rawSessionSlug.replace(legacyTaskToken, '__');
+  }
   const transcriptsDir = path.join(projectDir, 'transcripts', taskSlug);
   ensureDir(transcriptsDir);
   return path.join(transcriptsDir, `${sessionSlug}.txt`);
@@ -808,7 +804,7 @@ async function main() {
           const launchStatuses = statusCfgFromThen(thenCfg, statusDefaults);
           const sessionTs = sessionTimestampUtc();
           const launchColumn = nextTask.column || toColumn || fromColumn;
-          const sessionId = `${sessionIdForTaskAndColumn(item.file, launchAgent, launchColumn)}__${sessionTs}`;
+          const sessionId = `${sessionIdForTask(item.file, nextTask, launchAgent)}__${sessionTs}`;
           const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
           const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
           const result = runAgent(
@@ -818,7 +814,6 @@ async function main() {
             launchStatuses,
             transcriptRelPath,
             sessionTs,
-            launchColumn,
             launchColumn,
           );
           launched.push({
