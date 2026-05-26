@@ -187,8 +187,8 @@ function main() {
   if (!fs.existsSync(fullTaskPath)) throw new Error(`Task file not found: ${fullTaskPath}`);
 
   const data = loadYaml(fullTaskPath);
-  if (!Array.isArray(data.comments)) data.comments = [];
-  data.comments.push({
+  if (!Array.isArray(data.updates)) data.updates = [];
+  data.updates.push({
     author: 'user',
     text: comment,
     created_at: new Date().toISOString(),

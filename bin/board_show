@@ -406,10 +406,10 @@ function redraw(stateRef) {
     const output = stateRef.mode === 'details' || stateRef.mode === 'comment'
       ? renderTaskDetails(stateRef)
       : renderBoard(stateRef);
-    process.stdout.write('\x1Bc');
+    process.stdout.write('\x1b[H\x1b[J');
     process.stdout.write(`${output}\n`);
   } catch (err) {
-    process.stdout.write('\x1Bc');
+    process.stdout.write('\x1b[H\x1b[J');
     process.stdout.write(`KANBAN ERROR\n\n${err.message}\n`);
   }
 }
@@ -476,8 +476,8 @@ function archiveTask(task, projectDir) {
 
 function addTaskComment(task, text) {
   const data = loadYaml(task.path);
-  if (!Array.isArray(data.comments)) data.comments = [];
-  data.comments.push({
+  if (!Array.isArray(data.updates)) data.updates = [];
+  data.updates.push({
     author: 'user',
     text,
     created_at: new Date().toISOString(),
@@ -566,12 +566,15 @@ function readSchemaEnum(projectDir, propertyName) {
 }
 
 function buildMoveOptions(stateRef) {
-  const schemaColumns = readSchemaEnum(stateRef.projectDir, 'column');
+  const dispatchColumns = uniqInOrder(
+    (stateRef.board && Array.isArray(stateRef.board.columns) ? stateRef.board.columns : [])
+      .map((c) => c && c.name)
+  );
   const schemaStatuses = readSchemaEnum(stateRef.projectDir, 'status');
   const agentsFromDir = uniqInOrder(readAgentNames(stateRef.projectDir));
   const assignees = uniqInOrder(['-', ...agentsFromDir]);
   return {
-    column: schemaColumns,
+    column: dispatchColumns,
     status: schemaStatuses.length > 0 ? schemaStatuses : ['todo', 'in_progress', 'blocked', 'review', 'done'],
     assignee: assignees.length > 0 ? assignees : ['-', 'bsa', 'coder', 'qa'],
   };
@@ -805,8 +808,12 @@ function openTaskTmux(stateRef) {
   }
   const sessionIdPrefix = sessionIdForTask(task);
   const sessions = listMatchingTmuxSessions(sessionIdPrefix);
-  const sessionId = sessions.length > 0 ? sessions[0].name : sessionIdPrefix;
-  if (!tmuxSessionExists(sessionId)) {
+  // Prefer the freshest tmux session matching the task prefix.
+  // Fallback to exact (legacy) session id without timestamp suffix.
+  const sessionId = sessions.length > 0
+    ? sessions[0].name
+    : (tmuxSessionExists(sessionIdPrefix) ? sessionIdPrefix : '');
+  if (!sessionId) {
     setMessage(stateRef, `tmux session not found for current column: ${sessionIdPrefix}`);
     return;
   }

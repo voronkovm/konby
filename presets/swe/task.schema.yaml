@@ -31,11 +31,6 @@ properties:
   column:
     type: string
     default: backlog
-    enum:
-      - backlog
-      - in_progress
-      - review
-      - done
 
   status:
     type: string
@@ -94,7 +89,7 @@ properties:
     type: number
     minimum: 0
 
-  comments:
+  updates:
     type: array
     items:
       type: object
@@ -107,9 +102,12 @@ properties:
         text:
           type: string
           minLength: 1
-        transcript:
-          type: string
-          minLength: 1
+        attachments:
+          type: array
+          items:
+            type: string
+            minLength: 1
+          minItems: 1
         created_at:
           type: string
           format: date-time

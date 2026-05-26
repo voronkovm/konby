@@ -5,7 +5,9 @@ usage() {
   cat <<'USAGE'
 Usage:
   session_new --agent <agent-file> --task <task-file> [--board <path>]
+              [--column <column>]
               [--transcript <path>] [--session-ts <UTC timestamp>]
+              [--completion-column <column>]
               [--status-todo <status>] [--status-in-progress <status>]
               [--status-success <status>] [--status-failure <status>]
 
@@ -26,6 +28,8 @@ status_todo_arg=""
 status_in_progress_arg=""
 status_success_arg=""
 status_failure_arg=""
+completion_column_arg=""
+column_arg=""
 transcript_path_arg=""
 session_ts_arg=""
 
@@ -64,6 +68,16 @@ while [[ $# -gt 0 ]]; do
     --status-failure)
       [[ $# -ge 2 ]] || err "--status-failure requires a value"
       status_failure_arg="$2"
+      shift 2
+      ;;
+    --completion-column)
+      [[ $# -ge 2 ]] || err "--completion-column requires a value"
+      completion_column_arg="$2"
+      shift 2
+      ;;
+    --column)
+      [[ $# -ge 2 ]] || err "--column requires a value"
+      column_arg="$2"
       shift 2
       ;;
     --transcript)
@@ -221,9 +235,16 @@ role_text="$(read_block_scalar role "$agent_file")"
 cli_cmd="$(read_scalar cli "$agent_file")"
 [[ -n "$cli_cmd" ]] || err "Could not read cli from $agent_file"
 
-column="$(read_scalar column "$task_file")"
+column="$column_arg"
+if [[ -z "$column" ]]; then
+  column="$(read_scalar column "$task_file")"
+fi
 if [[ -z "$column" ]]; then
   column="backlog"
+fi
+completion_column="$completion_column_arg"
+if [[ -z "$completion_column" ]]; then
+  completion_column="$column"
 fi
 task_base="$(basename "$task_file")"
 task_slug="$task_base"
@@ -331,10 +352,11 @@ ${task_text}
 
 Completion protocol:
 - For success, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${success_status}\" --comment \"<short summary>\" --transcript \"${transcript_path}\" --author \"${agent_slug}\"
+konby task move \"${task_abs_path}\" --column \"${completion_column}\" --status \"${success_status}\" --comment \"<short summary>\" --attachment \"${transcript_path}\" --author \"${agent_slug}\"
 - For failure/blocker, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\" --transcript \"${transcript_path}\" --author \"${agent_slug}\"
-- If additional input from the user is required to proceed, move the task to \"${failure_status}\" and explain what input is needed in the comment."
+konby task move \"${task_abs_path}\" --column \"${completion_column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\" --attachment \"${transcript_path}\" --author \"${agent_slug}\"
+- If additional input from the user is required to proceed, move the task to \"${failure_status}\" and explain what input is needed in the comment.
+- Never modify/create any files outside of the workspace/sandbox other than by means of 'konby ...' commands."
 
 tmux new-session -d -s "$session_id" -c "$workspace_dir"
 # Default to tmux mouse support for scrolling/history.

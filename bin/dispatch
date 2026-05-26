@@ -102,7 +102,7 @@ function applyStatusUpdateViaTaskMove(projectDir, taskPath, status, reasonText, 
   return runTaskMove(projectDir, taskPath, {
     status,
     comment,
-    transcript: transcriptRelPath,
+    attachments: transcriptRelPath,
     author: 'dispatcher',
   });
 }
@@ -248,12 +248,14 @@ function resolveStatusCfgForTask(task, rules, defaults) {
   return best || base;
 }
 
-function runAgent(projectDir, agent, taskPath, statusCfg, transcriptPath, sessionTs) {
+function runAgent(projectDir, agent, taskPath, statusCfg, transcriptPath, sessionTs, completionColumn, launchColumn) {
   const cmd = path.join(__dirname, 'session_new');
   const agentFile = path.join('agents', `${agent}.yaml`);
   const args = ['--board', projectDir, '--agent', agentFile, '--task', taskPath];
   if (transcriptPath) args.push('--transcript', transcriptPath);
   if (sessionTs) args.push('--session-ts', sessionTs);
+  if (completionColumn) args.push('--completion-column', completionColumn);
+  if (launchColumn) args.push('--column', launchColumn);
   if (statusCfg && statusCfg.todo) args.push('--status-todo', statusCfg.todo);
   if (statusCfg && statusCfg.in_progress) args.push('--status-in-progress', statusCfg.in_progress);
   if (statusCfg && statusCfg.success) args.push('--status-success', statusCfg.success);
@@ -272,7 +274,11 @@ function runTaskMove(projectDir, taskPath, updates) {
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'status')) args.push('--status', String(updates.status));
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'assignee')) args.push('--assignee', String(updates.assignee));
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'comment')) args.push('--comment', String(updates.comment));
-  if (updates && Object.prototype.hasOwnProperty.call(updates, 'transcript')) args.push('--transcript', String(updates.transcript));
+  if (updates && Object.prototype.hasOwnProperty.call(updates, 'attachments')) {
+    const attachmentValue = updates.attachments;
+    const attachmentPath = Array.isArray(attachmentValue) ? attachmentValue[0] : attachmentValue;
+    if (attachmentPath !== undefined && attachmentPath !== null) args.push('--attachment', String(attachmentPath));
+  }
   if (updates && Object.prototype.hasOwnProperty.call(updates, 'author')) args.push('--author', String(updates.author));
   return spawnSync(cmd, args, {
     cwd: projectDir,
@@ -285,6 +291,13 @@ function sessionIdForTask(taskFile, task, agent) {
   const taskBase = path.basename(taskFile);
   const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
   return `${agent}__${column}___${taskSlug}`;
+}
+
+function sessionIdForTaskAndColumn(taskFile, agent, column) {
+  const safeColumn = String(column || 'backlog').trim() || 'backlog';
+  const taskBase = path.basename(taskFile);
+  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
+  return `${agent}__${safeColumn}___${taskSlug}`;
 }
 
 function sessionTimestampUtc() {
@@ -475,9 +488,9 @@ function transcriptForLlm(fullText, edgeLines = 150) {
 }
 
 function lastCommentMeta(taskData) {
-  const comments = Array.isArray(taskData?.comments) ? taskData.comments : [];
-  if (comments.length === 0) return { author: '', timestampMs: null };
-  const dated = comments
+  const updates = Array.isArray(taskData?.updates) ? taskData.updates : [];
+  if (updates.length === 0) return { author: '', timestampMs: null };
+  const dated = updates
     .map((comment, idx) => ({
       idx,
       author: String(comment?.author || '').trim(),
@@ -553,17 +566,19 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
       continue;
     }
     const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
-    const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
+    const hadTranscriptFile = fs.existsSync(transcriptAbsPath);
+    const prevTranscript = hadTranscriptFile ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
     const { author: rawLastCommentAuthor, timestampMs: lastCommentTsMs } = lastCommentMeta(item.data);
     const isLastCommentByDispatcher = rawLastCommentAuthor.toLowerCase() === 'dispatcher';
-    const transcriptMtimeMs = fs.existsSync(transcriptAbsPath) ? fs.statSync(transcriptAbsPath).mtimeMs : null;
+    const transcriptMtimeMs = hadTranscriptFile ? fs.statSync(transcriptAbsPath).mtimeMs : null;
     const transcriptNotNewerThanLastComment = Number.isFinite(transcriptMtimeMs)
       && Number.isFinite(lastCommentTsMs)
       && transcriptMtimeMs <= (lastCommentTsMs + transcriptCommentMtimeToleranceMs);
     const shouldRefreshWithoutChange = !isLastCommentByDispatcher && transcriptNotNewerThanLastComment;
-    const transcriptContentChanged = prevTranscript === null || prevTranscript !== nextTranscript;
+    const transcriptContentChanged = hadTranscriptFile && prevTranscript !== nextTranscript;
+    const shouldInitializeTranscript = !hadTranscriptFile;
     const transcriptChanged = !shouldRefreshWithoutChange && transcriptContentChanged;
-    if (transcriptContentChanged) {
+    if (shouldInitializeTranscript || transcriptContentChanged) {
       fs.writeFileSync(transcriptAbsPath, nextTranscript, 'utf8');
     }
     if (transcriptChanged) {
@@ -792,10 +807,20 @@ async function main() {
         if (launchAgent) {
           const launchStatuses = statusCfgFromThen(thenCfg, statusDefaults);
           const sessionTs = sessionTimestampUtc();
-          const sessionId = `${sessionIdForTask(item.file, item.data, launchAgent)}__${sessionTs}`;
+          const launchColumn = nextTask.column || toColumn || fromColumn;
+          const sessionId = `${sessionIdForTaskAndColumn(item.file, launchAgent, launchColumn)}__${sessionTs}`;
           const transcriptAbsPath = transcriptFileForSession(projectDir, item.file, sessionId);
           const transcriptRelPath = path.relative(projectDir, transcriptAbsPath) || 'transcripts';
-          const result = runAgent(projectDir, launchAgent, item.file, launchStatuses, transcriptRelPath, sessionTs);
+          const result = runAgent(
+            projectDir,
+            launchAgent,
+            item.file,
+            launchStatuses,
+            transcriptRelPath,
+            sessionTs,
+            launchColumn,
+            launchColumn,
+          );
           launched.push({
             file: path.basename(item.file),
             agent: launchAgent,
