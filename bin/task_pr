@@ -73,10 +73,7 @@ task_file="$1"
 [[ -f "$task_file" ]] || err "Task file not found: $task_file"
 
 task_abs="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
-workspace="$(read_scalar workspace_dir "$task_abs")"
-if [[ -z "$workspace" ]]; then
-  workspace="$(read_scalar workspace "$task_abs")"
-fi
+workspace="$(read_scalar workspace "$task_abs")"
 if [[ -z "$workspace" ]]; then
   workspace="$(pwd)"
 elif [[ "$workspace" != /* ]]; then

@@ -259,10 +259,7 @@ failure_status="$status_failure_arg"
 if [[ -z "$failure_status" ]]; then
   failure_status="blocked"
 fi
-workspace_dir="$(read_scalar workspace_dir "$task_file")"
-if [[ -z "$workspace_dir" ]]; then
-  workspace_dir="$(read_scalar workspace "$task_file")"
-fi
+workspace_dir="$(read_scalar workspace "$task_file")"
 workspace_type="$(read_scalar workspace_type "$task_file")"
 if [[ -z "$workspace_type" ]]; then
   workspace_type="local"

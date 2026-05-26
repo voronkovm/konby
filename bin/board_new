@@ -73,7 +73,7 @@ set_workspace_default() {
 
   awk -v ws="$workspace_path" '
     BEGIN { in_ws = 0 }
-    /^[[:space:]]*(workspace|workspace_dir):/ { in_ws = 1; print; next }
+    /^[[:space:]]*workspace:/ { in_ws = 1; print; next }
     in_ws && /^[^[:space:]]/ { in_ws = 0 }
     in_ws && /^[[:space:]]*default:/ { print "    default: \"" ws "\""; next }
     { print }
