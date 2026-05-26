@@ -281,16 +281,22 @@ fi
 if [[ -z "$workspace_dir" ]]; then
   workspace_dir="$board_dir"
 elif [[ "$workspace_dir" != /* ]]; then
-  workspace_dir="$board_parent_dir/$workspace_dir"
+  workspace_dir="$board_dir/$workspace_dir"
 fi
 
 if [[ "$workspace_type" == "worktree" ]]; then
-  if ! git -C "$workspace_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    err "workspace_dir is not a git repository: $workspace_dir"
+  if [[ -d "$workspace_dir" ]] && git -C "$workspace_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    is_worktree_dir="$(git -C "$workspace_dir" rev-parse --git-path . 2>/dev/null | grep -c '/worktrees/' || true)"
+    if [[ "$is_worktree_dir" -eq 0 ]]; then
+      repo_root="$(git -C "$workspace_dir" rev-parse --show-toplevel)"
+    fi
+  else
+    repo_root="$board_dir"
+    git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || err "workspace_dir is not a git repository: $workspace_dir"
   fi
-  is_worktree_dir="$(git -C "$workspace_dir" rev-parse --git-path . 2>/dev/null | grep -c '/worktrees/' || true)"
-  if [[ "$is_worktree_dir" -eq 0 ]]; then
-    repo_root="$(git -C "$workspace_dir" rev-parse --show-toplevel)"
+
+  if [[ "${is_worktree_dir:-0}" -eq 0 ]]; then
     task_branch="konby/${task_slug}"
     task_branch="$(printf '%s' "$task_branch" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._\/-]+/-/g; s#/{2,}#/#g; s#^/+##; s#/*$##')"
     if [[ -z "$task_branch" ]]; then
@@ -347,8 +353,10 @@ fi
 task_text="$(cat "$task_file")"
 prompt="${role_text}
 
-Do the following task considering comments and updates:
+Do the following task considering  its desription and updates:
+<task>
 ${task_text}
+</task>
 
 Completion protocol:
 - For success, update task yourself with:
