@@ -333,17 +333,20 @@ function main() {
   if (assignee !== undefined) data.assignee = assignee;
   const nextColumn = String(data.column || '').trim();
   const nextStatus = String(data.status || '').trim();
+  const nextAssignee = String(data.assignee || '').trim();
   const columnChanged = prevColumn !== nextColumn;
   const statusChanged = prevStatus !== nextStatus;
+  const assigneeChanged = prevAssignee !== nextAssignee;
   const commentText = comment === undefined ? '' : String(comment).trim();
   const attachmentText = attachment === undefined ? '' : String(attachment).trim();
   if (comment !== undefined && !commentText) throw new Error('--comment cannot be empty');
   if (attachment !== undefined && !attachmentText) throw new Error('--attachment cannot be empty');
 
-  if (columnChanged || statusChanged || comment !== undefined || attachment !== undefined) {
+  if (columnChanged || statusChanged || assigneeChanged || comment !== undefined || attachment !== undefined) {
     const parts = [];
     if (statusChanged) parts.push(`status: ${prevStatus || '-'} -> ${nextStatus || '-'}`);
     if (columnChanged) parts.push(`column: ${prevColumn || '-'} -> ${nextColumn || '-'}`);
+    if (assigneeChanged) parts.push(`assignee: ${prevAssignee || '-'} -> ${nextAssignee || '-'}`);
     if (commentText) parts.push(`comment: ${commentText}`);
     const text = parts.join(', ');
     if (!Array.isArray(data.updates)) data.updates = [];
