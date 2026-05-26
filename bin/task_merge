@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+err() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+read_scalar() {
+  local key="$1"
+  local file="$2"
+  awk -v key="$key" '
+    {
+      if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
+        sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
+        gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
+        print $0
+        exit
+      }
+    }
+  ' "$file"
+}
+
+default_branch() {
+  local repo="$1"
+  local head_ref
+  head_ref="$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [[ -n "$head_ref" ]]; then
+    printf '%s\n' "${head_ref#refs/remotes/origin/}"
+    return
+  fi
+  for candidate in main master trunk; do
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/${candidate}"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  err "Could not determine default branch"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: task_merge <task-file>
+USAGE
+}
+
+[[ $# -ge 1 ]] || { usage; exit 1; }
+[[ "$1" != "--help" && "$1" != "-h" ]] || { usage; exit 0; }
+
+task_file="$1"
+[[ -f "$task_file" ]] || err "Task file not found: $task_file"
+
+task_abs="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
+workspace="$(read_scalar workspace_dir "$task_abs")"
+if [[ -z "$workspace" ]]; then
+  workspace="$(read_scalar workspace "$task_abs")"
+fi
+if [[ -z "$workspace" ]]; then
+  workspace="$(pwd)"
+elif [[ "$workspace" != /* ]]; then
+  task_parent="$(cd "$(dirname "$task_abs")/.." && pwd)"
+  workspace="$task_parent/$workspace"
+fi
+[[ -d "$workspace" ]] || err "workspace does not exist: $workspace"
+
+git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || err "workspace is not a git repository"
+feature_branch="$(git -C "$workspace" rev-parse --abbrev-ref HEAD)"
+[[ "$feature_branch" != "HEAD" ]] || err "workspace is in detached HEAD state"
+
+common_git_dir_raw="$(git -C "$workspace" rev-parse --git-common-dir)"
+if [[ "$common_git_dir_raw" = /* ]]; then
+  common_git_dir="$common_git_dir_raw"
+else
+  common_git_dir="$(cd "$workspace/$common_git_dir_raw" && pwd)"
+fi
+repo_root="$(cd "$common_git_dir/.." && pwd)"
+[[ -d "$repo_root/.git" ]] || err "Could not resolve main repository from worktree"
+
+default="$(default_branch "$repo_root")"
+[[ "$feature_branch" != "$default" ]] || err "Current branch equals default branch (${default}); nothing to merge"
+
+current_main_branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)"
+cleanup() {
+  git -C "$repo_root" checkout "$current_main_branch" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+git -C "$repo_root" checkout "$default" >/dev/null
+git -C "$repo_root" merge --no-ff "$feature_branch"
+
+echo "Merged ${feature_branch} into ${default} in ${repo_root}"

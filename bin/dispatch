@@ -171,12 +171,30 @@ function extractWhenThen(rule) {
   return { when, thenCfg };
 }
 
+function parseWhenValues(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((v) => String(v).trim())
+      .filter(Boolean);
+  }
+  return [String(raw).trim()].filter(Boolean);
+}
+
+function whenFieldMatches(taskValue, whenValue) {
+  if (whenValue === undefined) return true;
+  const values = parseWhenValues(whenValue);
+  if (values.length === 0) return true;
+  if (values.includes('*')) return true;
+  const current = String(taskValue || '').trim();
+  return values.includes(current);
+}
+
 function ruleMatches(task, rule) {
   const { when } = extractWhenThen(rule);
-  if (!(when.column === '*' || when.column === undefined || task.column === when.column)) return false;
-  if (!(when.status === '*' || when.status === undefined || task.status === when.status)) return false;
-  if (when.assignee === '*' || when.assignee === undefined) return true;
-  return task.assignee === when.assignee;
+  if (!whenFieldMatches(task.column, when.column)) return false;
+  if (!whenFieldMatches(task.status, when.status)) return false;
+  return whenFieldMatches(task.assignee, when.assignee);
 }
 
 function applyRule(task, rule, defaults) {
@@ -210,9 +228,10 @@ function resolveStatusCfgForTask(task, rules, defaults) {
     if (String(task.assignee || '').trim() !== thenAssignee) continue;
 
     let score = 2;
-    const expectedColumn = String(thenCfg.column || when.column || '').trim();
-    if (expectedColumn && expectedColumn !== '*') {
-      if (String(task.column || '').trim() !== expectedColumn) continue;
+    const expectedColumns = parseWhenValues(thenCfg.column || when.column);
+    if (expectedColumns.length > 0 && !expectedColumns.includes('*')) {
+      const currentColumn = String(task.column || '').trim();
+      if (!expectedColumns.includes(currentColumn)) continue;
       score += 2;
     }
 
@@ -278,7 +297,9 @@ function listSessionsForTask(taskFile, agent) {
   const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
   if (out.status !== 0) return [];
 
-  const taskToken = `___${taskSlug}__`;
+  const escapedTaskSlug = taskSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Session id format is strict: "<agent>__<column>___<task-slug>__<timestamp>".
+  const taskPattern = new RegExp(`___${escapedTaskSlug}__\\d{8}T\\d{6}Z$`);
   const prefix = String(agent || '').trim() ? `${agent}__` : '';
   return String(out.stdout || '')
     .split(/\r?\n/)
@@ -289,7 +310,7 @@ function listSessionsForTask(taskFile, agent) {
       const created = Number(createdRaw || 0);
       return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
     })
-    .filter((entry) => (!prefix || entry.name.startsWith(prefix)) && entry.name.includes(taskToken))
+    .filter((entry) => (!prefix || entry.name.startsWith(prefix)) && taskPattern.test(entry.name))
     .sort((a, b) => b.created - a.created);
 }
 
@@ -481,6 +502,7 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
   const apiKey = process.env.OPENAI_API_KEY || '';
   const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
   const endpoint = process.env.OPENAI_API_ENDPOINT || '/chat/completions';
+  const transcriptCommentMtimeToleranceMs = 2000;
 
   const updates = [];
   const todoStatus = String(defaults.todo || '').trim().toLowerCase();
@@ -535,7 +557,7 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
     const transcriptMtimeMs = fs.existsSync(transcriptAbsPath) ? fs.statSync(transcriptAbsPath).mtimeMs : null;
     const transcriptNotNewerThanLastComment = Number.isFinite(transcriptMtimeMs)
       && Number.isFinite(lastCommentTsMs)
-      && transcriptMtimeMs <= lastCommentTsMs;
+      && transcriptMtimeMs <= (lastCommentTsMs + transcriptCommentMtimeToleranceMs);
     const shouldRefreshWithoutChange = !isLastCommentByDispatcher && transcriptNotNewerThanLastComment;
     const transcriptContentChanged = prevTranscript === null || prevTranscript !== nextTranscript;
     const transcriptChanged = !shouldRefreshWithoutChange && transcriptContentChanged;

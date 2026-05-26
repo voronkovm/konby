@@ -15,6 +15,12 @@ Alternative (without global install, after npm publish):
 npx -y konby install --board my-board --preset swe
 ```
 
+For Codex sandbox runs, allow `konby` in `~/.codex/rules/default.rules`:
+
+```rules
+prefix_rule(pattern = ["konby"], decision = "allow")
+```
+
 ## Commands
 
 ```bash
@@ -24,6 +30,8 @@ konby board show [--board <path>]
 konby task add --title "..." [--board <path>]
 konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--transcript <path>] [--author <slug>]
 konby task comment <task-file> "<comment>"
+konby task pr <task-file>
+konby task merge <task-file>
 konby session new --agent <agent-file> --task <task-file> [--board <path>] [--transcript <path>]
 konby dispatch [--board <path>]
 konby dispatchd [--log-file <path>] [--board <path>]

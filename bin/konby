@@ -42,6 +42,10 @@ Additional commands:
     Move/update task fields and optionally append a comment.
   konby task comment <task-file> "<comment>"
     Append a comment to the task.
+  konby task pr <task-file>
+    Create/switch branch and open GitHub PR for the task workspace.
+  konby task merge <task-file>
+    Merge current worktree branch into repository default branch locally.
   konby session new --agent <agent-file> --task <task-file> [--board <path>]
     Manually start a tmux agent session for one task.
   konby dispatch [--board <path>]
@@ -154,7 +158,7 @@ main() {
       ;;
     task)
       shift
-      [[ $# -gt 0 ]] || err "Usage: konby task <add|move|comment> ..."
+      [[ $# -gt 0 ]] || err "Usage: konby task <add|move|comment|pr|merge> ..."
       case "$1" in
         add)
           shift
@@ -167,6 +171,14 @@ main() {
         comment)
           shift
           "$KONBY_BIN_DIR/task_comment" "$@"
+          ;;
+        pr)
+          shift
+          "$KONBY_BIN_DIR/task_pr" "$@"
+          ;;
+        merge)
+          shift
+          "$KONBY_BIN_DIR/task_merge" "$@"
           ;;
         *) err "Unknown task subcommand: $1" ;;
       esac

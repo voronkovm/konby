@@ -68,6 +68,12 @@ properties:
     description: "Workspace directory for the task"
     default: "./"
 
+  workspace_type:
+    type: string
+    description: "Workspace mode for task execution"
+    enum: [local, worktree]
+    default: worktree
+
   created_at:
     type: string
     format: date-time

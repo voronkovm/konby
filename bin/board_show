@@ -264,8 +264,8 @@ function renderBoard(stateRef) {
 
   const header = `KANBAN  ${new Date().toLocaleString()}  config=${path.basename(state.dispatchFile)}  (Ctrl+C to quit)`;
   const lines = [truncate(header, totalWidth)];
-  lines.push('Hotkeys: a - add new task |  | d - dispatch once | arrows - select task');
-  lines.push('Hotkeys for a task: m - move | t - open tmux | x - archive');
+  lines.push('Hotkeys: a - add new task | d - dispatch once | arrows - select task');
+  lines.push('Hotkeys for a task: m - move | t - open tmux | p - PR | g - merge | x - archive');
   lines.push('');
 
   const colLines = cols.map((col, colIndex) => {
@@ -336,7 +336,7 @@ function renderTaskDetails(stateRef) {
   const lines = [];
   const header = `TASK  ${task ? task.file : '(not found)'}  (Esc to board)`;
   lines.push(truncate(header, totalWidth));
-  lines.push('Hotkeys for a task: m - move | t - open tmux | x - archive');
+  lines.push('Hotkeys for a task: m - move | t - open tmux | p - PR | g - merge | x - archive');
   lines.push('');
 
   if (!task) {
@@ -448,7 +448,7 @@ function moveSelection(stateRef, dx, dy) {
 
 function runScriptOrThrow(scriptName, args) {
   const scriptPath = path.join(__dirname, scriptName);
-  const out = spawnSync(process.execPath, [scriptPath, ...args], {
+  const out = spawnSync(scriptPath, args, {
     encoding: 'utf8',
     cwd: process.cwd(),
   });
@@ -568,18 +568,11 @@ function readSchemaEnum(projectDir, propertyName) {
 function buildMoveOptions(stateRef) {
   const schemaColumns = readSchemaEnum(stateRef.projectDir, 'column');
   const schemaStatuses = readSchemaEnum(stateRef.projectDir, 'status');
-  const boardColumns = uniqInOrder(stateRef.board.columns.map((col) => col.name));
-  const taskColumns = uniqInOrder(stateRef.board.tasks.map((t) => t.column));
-  const taskStatuses = uniqInOrder(stateRef.board.tasks.map((t) => t.status));
-  const taskAssignees = uniqInOrder(stateRef.board.tasks.map((t) => t.assignee));
   const agentsFromDir = uniqInOrder(readAgentNames(stateRef.projectDir));
-  const assignees = uniqInOrder(['-', ...agentsFromDir, ...taskAssignees]);
+  const assignees = uniqInOrder(['-', ...agentsFromDir]);
   return {
-    column: uniqInOrder([...schemaColumns, ...boardColumns, ...taskColumns]),
-    status: (() => {
-      const values = uniqInOrder([...schemaStatuses, ...taskStatuses]);
-      return values.length > 0 ? values : ['todo', 'in_progress', 'blocked', 'review', 'done'];
-    })(),
+    column: schemaColumns,
+    status: schemaStatuses.length > 0 ? schemaStatuses : ['todo', 'in_progress', 'blocked', 'review', 'done'],
     assignee: assignees.length > 0 ? assignees : ['-', 'bsa', 'coder', 'qa'],
   };
 }
@@ -777,6 +770,23 @@ function tmuxSessionExists(sessionId) {
   return out.status === 0;
 }
 
+function listMatchingTmuxSessions(sessionIdPrefix) {
+  const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
+  if (out.status !== 0) return [];
+  const prefix = `${sessionIdPrefix}__`;
+  return String(out.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, createdRaw] = line.split('\t');
+      const created = Number(createdRaw || 0);
+      return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
+    })
+    .filter((entry) => entry.name === sessionIdPrefix || entry.name.startsWith(prefix))
+    .sort((a, b) => b.created - a.created);
+}
+
 function openTaskTmux(stateRef) {
   const task = selectedTask(stateRef);
   if (!task) {
@@ -788,9 +798,11 @@ function openTaskTmux(stateRef) {
     setMessage(stateRef, 'Task has no assignee agent');
     return;
   }
-  const sessionId = sessionIdForTask(task);
+  const sessionIdPrefix = sessionIdForTask(task);
+  const sessions = listMatchingTmuxSessions(sessionIdPrefix);
+  const sessionId = sessions.length > 0 ? sessions[0].name : sessionIdPrefix;
   if (!tmuxSessionExists(sessionId)) {
-    setMessage(stateRef, `tmux session not found for current column: ${sessionId}`);
+    setMessage(stateRef, `tmux session not found for current column: ${sessionIdPrefix}`);
     return;
   }
 
@@ -827,6 +839,21 @@ function runDispatchOnce(stateRef) {
     return;
   }
   setMessage(stateRef, 'Dispatch finished');
+}
+
+function runTaskAction(stateRef, scriptName, successMsg) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  try {
+    runScriptOrThrow(scriptName, [task.path]);
+    setMessage(stateRef, successMsg);
+    refreshBoard(stateRef);
+  } catch (err) {
+    setMessage(stateRef, `${scriptName} failed: ${err.message}`);
+  }
 }
 
 function main() {
@@ -977,6 +1004,10 @@ function main() {
         }
       } else if (key === 't') {
         openTaskTmux(stateRef);
+      } else if (key === 'p') {
+        runTaskAction(stateRef, 'task_pr', 'PR flow executed');
+      } else if (key === 'g') {
+        runTaskAction(stateRef, 'task_merge', 'Merge executed');
       } else if (key === 'd') {
         runDispatchOnce(stateRef);
       }
@@ -1004,6 +1035,10 @@ function main() {
       }
     } else if (key === 't') {
       openTaskTmux(stateRef);
+    } else if (key === 'p') {
+      runTaskAction(stateRef, 'task_pr', 'PR flow executed');
+    } else if (key === 'g') {
+      runTaskAction(stateRef, 'task_merge', 'Merge executed');
     } else if (key === 'd') {
       runDispatchOnce(stateRef);
     } else if (key === '\r') {

@@ -19,7 +19,9 @@ defaults:
 
 rules:
   - when:
-      column: backlog
+      column:
+        - backlog
+        - refinement
       status: todo
       assignee: "*"
     then:

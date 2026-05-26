@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+err() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+read_scalar() {
+  local key="$1"
+  local file="$2"
+  awk -v key="$key" '
+    {
+      if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
+        sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
+        gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
+        print $0
+        exit
+      }
+    }
+  ' "$file"
+}
+
+sanitize_branch() {
+  local raw="$1"
+  printf '%s' "$raw" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9._\/-]+/-/g; s#/{2,}#/#g; s#^/+##; s#/*$##; s/-+/-/g'
+}
+
+github_repo_slug() {
+  local remote="$1"
+  local slug=""
+  if [[ "$remote" =~ ^git@github\.com:(.+)\.git$ ]]; then
+    slug="${BASH_REMATCH[1]}"
+  elif [[ "$remote" =~ ^https://github\.com/(.+)\.git$ ]]; then
+    slug="${BASH_REMATCH[1]}"
+  elif [[ "$remote" =~ ^https://github\.com/(.+)$ ]]; then
+    slug="${BASH_REMATCH[1]}"
+  fi
+  slug="${slug#/}"
+  slug="${slug%/}"
+  printf '%s\n' "$slug"
+}
+
+default_branch() {
+  local repo="$1"
+  local head_ref
+  head_ref="$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [[ -n "$head_ref" ]]; then
+    printf '%s\n' "${head_ref#refs/remotes/origin/}"
+    return
+  fi
+  for candidate in main master trunk; do
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/${candidate}"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  err "Could not determine default branch"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: task_pr <task-file>
+USAGE
+}
+
+[[ $# -ge 1 ]] || { usage; exit 1; }
+[[ "$1" != "--help" && "$1" != "-h" ]] || { usage; exit 0; }
+
+task_file="$1"
+[[ -f "$task_file" ]] || err "Task file not found: $task_file"
+
+task_abs="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
+workspace="$(read_scalar workspace_dir "$task_abs")"
+if [[ -z "$workspace" ]]; then
+  workspace="$(read_scalar workspace "$task_abs")"
+fi
+if [[ -z "$workspace" ]]; then
+  workspace="$(pwd)"
+elif [[ "$workspace" != /* ]]; then
+  task_parent="$(cd "$(dirname "$task_abs")/.." && pwd)"
+  workspace="$task_parent/$workspace"
+fi
+[[ -d "$workspace" ]] || err "workspace does not exist: $workspace"
+
+git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || err "workspace is not a git repository"
+repo_root="$(git -C "$workspace" rev-parse --show-toplevel)"
+git -C "$repo_root" remote get-url origin >/dev/null 2>&1 || err "Git remote origin is not configured"
+remote_url="$(git -C "$repo_root" remote get-url origin)"
+[[ "$remote_url" == *github.com* ]] || err "origin remote is not GitHub: $remote_url"
+repo_slug="$(github_repo_slug "$remote_url")"
+[[ -n "$repo_slug" ]] || err "Could not parse GitHub repository from origin URL: $remote_url"
+command -v gh >/dev/null 2>&1 || err "gh CLI is not installed"
+
+default="$(default_branch "$repo_root")"
+current_branch="$(git -C "$workspace" rev-parse --abbrev-ref HEAD)"
+task_id="$(read_scalar id "$task_abs")"
+if [[ -z "$task_id" ]]; then
+  task_id="$(basename "$task_abs" .yml)"
+  task_id="${task_id%.yaml}"
+fi
+
+if [[ "$current_branch" == "$default" ]]; then
+  target_branch="$(sanitize_branch "konby/${task_id}")"
+  [[ -n "$target_branch" ]] || target_branch="konby/task"
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/${target_branch}"; then
+    git -C "$workspace" checkout "$target_branch" >/dev/null
+  else
+    git -C "$workspace" checkout -b "$target_branch" >/dev/null
+  fi
+  current_branch="$target_branch"
+fi
+
+git -C "$workspace" push -u origin "$current_branch" >/dev/null
+
+existing_pr_url="$(gh pr view --repo "$repo_slug" "$current_branch" --json url --jq .url 2>/dev/null || true)"
+if [[ -n "$existing_pr_url" ]]; then
+  echo "PR already exists: $existing_pr_url"
+  exit 0
+fi
+
+gh pr create --repo "$repo_slug" --base "$default" --head "$current_branch" --fill >/dev/null
+new_pr_url="$(gh pr view --repo "$repo_slug" "$current_branch" --json url --jq .url)"
+echo "Created PR: $new_pr_url"
