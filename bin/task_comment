@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { resolveTaskSchemaPath: resolveTaskSchemaPathFromWorkdir } = require('../lib/workdir');
 
 function parseScalar(value) {
   if (value === 'true') return true;
@@ -151,9 +152,7 @@ function orderBySchema(value, schema) {
 }
 
 function resolveTaskSchemaPath(taskFileAbs) {
-  const taskDir = path.dirname(taskFileAbs);
-  const projectDir = path.basename(taskDir) === 'tasks' ? path.dirname(taskDir) : process.cwd();
-  return path.join(projectDir, 'task.schema.yaml');
+  return resolveTaskSchemaPathFromWorkdir(taskFileAbs, process.env.PWD || process.cwd());
 }
 
 function saveTaskYamlOrdered(taskFileAbs, obj) {

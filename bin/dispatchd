@@ -2,8 +2,9 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workdir_js="$root_dir/lib/workdir.js"
 log_file="${TMPDIR:-/tmp}/code-conveyor-dispatchd.log"
-board_dir="$(pwd)"
+board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)")"
 
 usage() {
   cat <<'USAGE'
@@ -16,7 +17,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --board|--dir)
       [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 1; }
-      board_dir="$(cd "$2" && pwd)"
+      board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --path "$2")"
       shift 2
       ;;
     --log-file)

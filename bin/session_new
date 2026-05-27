@@ -20,9 +20,12 @@ err() {
   exit 1
 }
 
+konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workdir_js="$konby_home/lib/workdir.js"
+
 agent_input=""
 task_file=""
-board_dir="$(pwd)"
+board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)")"
 status_todo_arg=""
 status_in_progress_arg=""
 status_success_arg=""
@@ -95,7 +98,7 @@ done
 
 [[ -n "$agent_input" ]] || err "--agent is required"
 [[ -n "$task_file" ]] || err "--task is required"
-board_dir="$(cd "$board_dir" && pwd)"
+board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --path "$board_dir" --task "$task_file")"
 board_parent_dir="$(cd "$board_dir/.." && pwd)"
 cd "$board_dir"
 

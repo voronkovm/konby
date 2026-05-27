@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { listTaskSessions } = require('../lib/tmux_sessions');
+const { resolveBoardDir, resolveTaskSchemaPath: resolveTaskSchemaPathFromWorkdir } = require('../lib/workdir');
 
 function parseScalar(value) {
   if (value === 'true') return true;
@@ -152,9 +154,7 @@ function orderBySchema(value, schema) {
 }
 
 function resolveTaskSchemaPath(taskFileAbs) {
-  const taskDir = path.dirname(taskFileAbs);
-  const projectDir = path.basename(taskDir) === 'tasks' ? path.dirname(taskDir) : process.cwd();
-  return path.join(projectDir, 'task.schema.yaml');
+  return resolveTaskSchemaPathFromWorkdir(taskFileAbs, process.env.PWD || process.cwd());
 }
 
 function saveTaskYamlOrdered(taskFileAbs, obj) {
@@ -180,25 +180,6 @@ function sanitizePathToken(value, fallback) {
   return safe || fallback;
 }
 
-function listSessionsForTask(taskFile) {
-  const taskBase = path.basename(taskFile);
-  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
-  const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
-  if (out.status !== 0) return [];
-  const taskToken = `___${taskSlug}__`;
-  return String(out.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name, createdRaw] = line.split('\t');
-      const created = Number(createdRaw || 0);
-      return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
-    })
-    .filter((entry) => entry.name.includes(taskToken))
-    .sort((a, b) => b.created - a.created);
-}
-
 function captureTmux(sessionId) {
   const out = spawnSync('tmux', ['capture-pane', '-J', '-t', sessionId, '-p', '-S', '-', '-E', '-'], {
     encoding: 'utf8',
@@ -212,23 +193,25 @@ function captureTmux(sessionId) {
 function transcriptFileForSession(projectDir, taskFile, sessionId) {
   const taskSlug = sanitizePathToken(path.basename(taskFile).replace(/\.ya?ml$/i, ''), 'task');
   const rawSessionSlug = sanitizePathToken(sessionId || 'session', 'session');
-  const taskToken = `___${taskSlug}__`;
-  const sessionSlug = rawSessionSlug.includes(taskToken)
-    ? rawSessionSlug.replace(taskToken, '__')
-    : rawSessionSlug;
+  const legacyTaskToken = `___${taskSlug}__`;
+  const taskToken = `__${taskSlug}__`;
+  let sessionSlug = rawSessionSlug;
+  if (rawSessionSlug.includes(taskToken)) {
+    sessionSlug = rawSessionSlug.replace(taskToken, '__');
+  } else if (rawSessionSlug.includes(legacyTaskToken)) {
+    sessionSlug = rawSessionSlug.replace(legacyTaskToken, '__');
+  }
   const transcriptsDir = path.join(projectDir, 'transcripts', taskSlug);
   ensureDir(transcriptsDir);
   return path.join(transcriptsDir, `${sessionSlug}.txt`);
 }
 
 function guessProjectDir(taskFileAbs) {
-  const taskDir = path.dirname(taskFileAbs);
-  if (path.basename(taskDir) === 'tasks') return path.dirname(taskDir);
-  return process.cwd();
+  return resolveBoardDir({ startDir: process.env.PWD || process.cwd(), taskFile: taskFileAbs });
 }
 
 function closeTaskSessionsOnAssigneeChange(projectDir, taskFile) {
-  const sessions = listSessionsForTask(taskFile);
+  const sessions = listTaskSessions(taskFile);
   let closed = 0;
   let transcriptUpdated = 0;
   for (const session of sessions) {

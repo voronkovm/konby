@@ -6,6 +6,9 @@ err() {
   exit 1
 }
 
+konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workdir_js="$konby_home/lib/workdir.js"
+
 read_scalar() {
   local key="$1"
   local file="$2"
@@ -73,12 +76,12 @@ task_file="$1"
 [[ -f "$task_file" ]] || err "Task file not found: $task_file"
 
 task_abs="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
+board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --task "$task_abs")"
 workspace="$(read_scalar workspace "$task_abs")"
 if [[ -z "$workspace" ]]; then
-  workspace="$(pwd)"
+  workspace="$board_dir"
 elif [[ "$workspace" != /* ]]; then
-  task_parent="$(cd "$(dirname "$task_abs")/.." && pwd)"
-  workspace="$task_parent/$workspace"
+  workspace="$board_dir/$workspace"
 fi
 [[ -d "$workspace" ]] || err "workspace does not exist: $workspace"
 

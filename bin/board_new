@@ -8,7 +8,7 @@ while [ -L "$SOURCE_PATH" ]; do
   [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
 done
 SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
-KONBY_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
+KONBY_HOME="$(node "$SOURCE_DIR/../lib/workdir.js" resolve-konby-home --start "$SOURCE_DIR")"
 
 usage() {
   cat <<'USAGE'

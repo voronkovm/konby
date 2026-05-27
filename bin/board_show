@@ -3,6 +3,8 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { listTaskSessions, sessionIdPrefix } = require('../lib/tmux_sessions');
+const { resolveBoardDir } = require('../lib/workdir');
 
 function parseScalar(value) {
   if (value.startsWith('[') && value.endsWith(']')) {
@@ -757,41 +759,14 @@ function parseMouseWheelDelta(key) {
   return 0;
 }
 
-function taskSlugFromFile(fileName) {
-  return String(fileName || '').replace(/\.ya?ml$/i, '');
-}
-
 function sessionIdForTask(task) {
   const agent = String(task.assignee || '').trim();
-  const taskSlug = taskSlugFromFile(task.file);
-  return `${agent}__${taskSlug}`;
+  return sessionIdPrefix(agent, task.file);
 }
 
 function tmuxSessionExists(sessionId) {
   const out = spawnSync('tmux', ['has-session', '-t', sessionId], { encoding: 'utf8' });
   return out.status === 0;
-}
-
-function listMatchingTmuxSessions(sessionIdPrefix) {
-  const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
-  if (out.status !== 0) return [];
-  // IMPORTANT SESSION ID INVARIANT:
-  // Must stay in sync with bin/session_new and bin/dispatch.
-  // Strict format: "<agent>__<task-slug>__YYYYMMDDTHHMMSSZ".
-  const escapedPrefix = sessionIdPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fullPattern = new RegExp(`^${escapedPrefix}__\\d{8}T\\d{6}Z$`);
-  const prefix = `${sessionIdPrefix}__`;
-  return String(out.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name, createdRaw] = line.split('\t');
-      const created = Number(createdRaw || 0);
-      return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
-    })
-    .filter((entry) => fullPattern.test(entry.name) || entry.name.startsWith(prefix))
-    .sort((a, b) => b.created - a.created);
 }
 
 function openTaskTmux(stateRef) {
@@ -806,7 +781,7 @@ function openTaskTmux(stateRef) {
     return;
   }
   const sessionIdPrefix = sessionIdForTask(task);
-  const sessions = listMatchingTmuxSessions(sessionIdPrefix);
+  const sessions = listTaskSessions(task.file, { agent, includeLegacyPrefix: true });
   // Prefer the freshest tmux session matching the task prefix.
   // Fallback to exact (legacy) session id without timestamp suffix.
   const sessionId = sessions.length > 0
@@ -869,7 +844,7 @@ function runTaskAction(stateRef, scriptName, successMsg) {
 
 function main() {
   const argv = process.argv.slice(2);
-  let projectDir = process.cwd();
+  let boardPathHint;
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
     if (token === '--help' || token === '-h') {
@@ -879,22 +854,23 @@ function main() {
     if (token === '--board') {
       const next = argv[i + 1];
       if (!next) throw new Error('Missing value after --board');
-      projectDir = path.resolve(next);
+      boardPathHint = next;
       i += 1;
       continue;
     }
     if (token.startsWith('--board=')) {
-      projectDir = path.resolve(token.slice('--board='.length));
+      boardPathHint = token.slice('--board='.length);
       continue;
     }
     if (token.startsWith('-')) {
       throw new Error(`Unknown argument: ${token}`);
     }
-    if (projectDir !== process.cwd()) {
+    if (boardPathHint !== undefined) {
       throw new Error('Usage: board_show [path] [--board <path>]');
     }
-    projectDir = path.resolve(token);
+    boardPathHint = token;
   }
+  const projectDir = resolveBoardDir({ startDir: process.env.PWD || process.cwd(), pathHint: boardPathHint });
 
   const stateRef = {
     projectDir,

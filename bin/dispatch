@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
+const { listTaskSessions, sessionIdPrefix } = require('../lib/tmux_sessions');
+const { resolveBoardDir } = require('../lib/workdir');
 
 function parseScalar(value) {
   if (value === 'true') return true;
@@ -286,42 +288,15 @@ function runTaskMove(projectDir, taskPath, updates) {
 }
 
 function sessionIdForTask(taskFile, task, agent) {
-  const taskBase = path.basename(taskFile);
-  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
-  return `${agent}__${taskSlug}`;
+  return sessionIdPrefix(agent, taskFile);
 }
 
 function sessionTimestampUtc() {
   return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 
-function listSessionsForTask(taskFile, agent) {
-  const taskBase = path.basename(taskFile);
-  const taskSlug = taskBase.replace(/\.ya?ml$/i, '');
-  const out = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8' });
-  if (out.status !== 0) return [];
-
-  const escapedTaskSlug = taskSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // IMPORTANT SESSION ID INVARIANT:
-  // Must stay in sync with bin/session_new and bin/board_show.
-  // Strict format: "<agent>__<task-slug>__YYYYMMDDTHHMMSSZ".
-  const taskPattern = new RegExp(`__${escapedTaskSlug}__\\d{8}T\\d{6}Z$`);
-  const prefix = String(agent || '').trim() ? `${agent}__` : '';
-  return String(out.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name, createdRaw] = line.split('\t');
-      const created = Number(createdRaw || 0);
-      return { name: String(name || ''), created: Number.isFinite(created) ? created : 0 };
-    })
-    .filter((entry) => (!prefix || entry.name.startsWith(prefix)) && taskPattern.test(entry.name))
-    .sort((a, b) => b.created - a.created);
-}
-
 function mostRecentSessionForTask(taskFile, task, agent) {
-  const sessions = listSessionsForTask(taskFile, agent);
+  const sessions = listTaskSessions(taskFile, { agent });
   if (sessions.length > 0) return sessions[0];
   return { name: sessionIdForTask(taskFile, task, agent), created: 0 };
 }
@@ -369,7 +344,7 @@ function transcriptFileForSession(projectDir, taskFile, sessionId) {
 }
 
 function closeTaskSessionsOnAssigneeChange(projectDir, taskFile) {
-  const sessions = listSessionsForTask(taskFile, '');
+  const sessions = listTaskSessions(taskFile);
   let closed = 0;
   let transcriptUpdated = 0;
   for (const session of sessions) {
@@ -718,22 +693,22 @@ function acquireLock(projectDir) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  let projectDir = process.cwd();
+  let boardPathHint;
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
     if (token === '--board' || token === '--dir') {
       const next = argv[i + 1];
       if (!next) throw new Error(`Missing value after ${token}`);
-      projectDir = path.resolve(next);
+      boardPathHint = next;
       i += 1;
       continue;
     }
     if (token.startsWith('--board=')) {
-      projectDir = path.resolve(token.slice('--board='.length));
+      boardPathHint = token.slice('--board='.length);
       continue;
     }
     if (token.startsWith('--dir=')) {
-      projectDir = path.resolve(token.slice('--dir='.length));
+      boardPathHint = token.slice('--dir='.length);
       continue;
     }
     if (token === '--help' || token === '-h') {
@@ -742,6 +717,7 @@ async function main() {
     }
     throw new Error(`Unknown argument: ${token}`);
   }
+  const projectDir = resolveBoardDir({ startDir: process.env.PWD || process.cwd(), pathHint: boardPathHint });
 
   const releaseLock = acquireLock(projectDir);
   if (!releaseLock) {

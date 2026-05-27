@@ -11,10 +11,12 @@ SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
 
 KONBY_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
 KONBY_BIN_DIR="$KONBY_HOME/bin"
+KONBY_VERSION="$(node -e "console.log(require(process.argv[1]).version)" "$KONBY_HOME/package.json" 2>/dev/null || echo "unknown")"
 
 usage() {
-  cat <<'USAGE'
+  cat <<'USAGE' | sed "s/__KONBY_VERSION__/${KONBY_VERSION}/"
 konby - streamline teams of agents using kanban boards
+version: __KONBY_VERSION__
 
 Usage steps:
   1. Create a new board:

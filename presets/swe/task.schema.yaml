@@ -61,7 +61,6 @@ properties:
     type: string
     minLength: 1
     description: "Workspace directory for the task"
-    default: "./"
 
   workspace_type:
     type: string

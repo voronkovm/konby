@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { resolveBoardDir } = require('../lib/workdir');
 
 function loadDotEnv(projectDir) {
   const envPath = path.join(projectDir, '.env');
@@ -619,7 +620,10 @@ async function writeTaskFile(dirPath, obj, force, schema) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const boardDir = path.resolve(args.values.board || args.values.dir || process.cwd());
+  const boardDir = resolveBoardDir({
+    startDir: process.env.PWD || process.cwd(),
+    pathHint: args.values.board || args.values.dir,
+  });
   const projectDir = boardDir;
   loadDotEnv(projectDir);
   const schemaPath = path.resolve(
