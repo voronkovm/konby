@@ -37,6 +37,13 @@ rules:
 
   - when:
       column: development
+      assignee: qa
+      status: todo
+    then:
+      assignee: qa
+
+  - when:
+      column: development
       assignee: coder
       status: done
     then:
@@ -48,7 +55,7 @@ rules:
       status: done
     then:
       column: review
-      status: todo
+      status_in_progress: todo
       assignee: "-"
 
   - when:
