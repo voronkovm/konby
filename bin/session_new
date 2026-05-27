@@ -81,7 +81,7 @@ function handleStartupDialogs(pane, cli) {
   return false;
 }
 
-function waitForCliReady(pane, cli, tries = 120, delayMs = 500) {
+function waitForCliReady(pane, cli, tries = Number(process.env.KONBY_SESSION_READY_TRIES || 120), delayMs = 500) {
   for (let i = 0; i < tries; i++) {
     if (handleStartupDialogs(pane, cli)) {
       sleep(delayMs);

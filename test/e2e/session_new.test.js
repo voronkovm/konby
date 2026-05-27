@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const { makeBoard, addTask, cleanup, BIN } = require('../integration/fixtures');
+const { run, makeBoard, addTask, cleanup, BIN } = require('../integration/fixtures');
 const { sessionIdForTask, agentSlugFromFile } = require('../../lib/session_new');
 
 // --- precondition guard ---
@@ -75,11 +75,13 @@ function waitForTmuxContent(id, re, tries = 20, delayMs = 500) {
 test('session_new starts a tmux session with codex', { skip: missingDep, timeout: 120000 }, () => {
   const boardDir = makeBoard({ preset: 'swe' });
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  let taskFile = null;
   let sessionId = null;
   try {
-    const taskFile = addTask(boardDir, 'e2e test task', [
+    taskFile = addTask(boardDir, 'e2e test task', [
       '--workspace', workspaceDir,
       '--workspace_type', 'local',
+      '--assignee', 'coder',
     ]);
     const out = runSessionNew([
       '--agent', 'agents/coder.yaml',
@@ -96,7 +98,8 @@ test('session_new starts a tmux session with codex', { skip: missingDep, timeout
       'codex output should appear in pane',
     );
   } finally {
-    tmuxKillIfExists(sessionId);
+    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
+    else tmuxKillIfExists(sessionId);
     cleanup(boardDir);
     cleanup(workspaceDir);
   }
@@ -105,12 +108,14 @@ test('session_new starts a tmux session with codex', { skip: missingDep, timeout
 test('session_new creates git worktree and starts session', { skip: missingDep, timeout: 120000 }, () => {
   const boardDir = makeBoard({ preset: 'swe' });
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
+  let taskFile = null;
   let sessionId = null;
   try {
     makeGitRepo(repoDir);
     // workspace_type defaults to 'worktree' in the swe preset schema
-    const taskFile = addTask(boardDir, 'worktree task', [
+    taskFile = addTask(boardDir, 'worktree task', [
       '--workspace', repoDir,
+      '--assignee', 'coder',
     ]);
     const out = runSessionNew([
       '--agent', 'agents/coder.yaml',
@@ -132,7 +137,8 @@ test('session_new creates git worktree and starts session', { skip: missingDep, 
     const worktreeDir = wsMatch[1].trim().replace(/^['"]|['"]$/g, '');
     assert.ok(fs.existsSync(worktreeDir), `worktree dir should exist: ${worktreeDir}`);
   } finally {
-    tmuxKillIfExists(sessionId);
+    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
+    else tmuxKillIfExists(sessionId);
     cleanup(boardDir);
     fs.rmSync(repoDir, { recursive: true, force: true });
   }
@@ -142,11 +148,12 @@ test('session_new fails when tmux session already exists', { skip: missingDep, t
   const boardDir = makeBoard({ preset: 'swe' });
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
   const sessionTs = '20250101T000000Z';
-  let sessionId = null;
+  let taskFile = null;
   try {
-    const taskFile = addTask(boardDir, 'duplicate session task', [
+    taskFile = addTask(boardDir, 'duplicate session task', [
       '--workspace', workspaceDir,
       '--workspace_type', 'local',
+      '--assignee', 'coder',
     ]);
 
     // Kill any stale session from a previous run with the same deterministic ID
@@ -162,13 +169,12 @@ test('session_new fails when tmux session already exists', { skip: missingDep, t
 
     const first = runSessionNew(baseArgs);
     assert.equal(first.status, 0, `first session_new failed:\n${first.stderr}`);
-    sessionId = extractSessionId(first.stdout);
 
     const second = runSessionNew(baseArgs);
     assert.notEqual(second.status, 0, 'second call with same session-ts should fail');
     assert.match(second.stderr, /tmux session already exists/i);
   } finally {
-    tmuxKillIfExists(sessionId);
+    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
     cleanup(boardDir);
     cleanup(workspaceDir);
   }
