@@ -1,0 +1,211 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const { makeBoard, addTask, cleanup, BIN } = require('../integration/fixtures');
+const { sessionIdForTask, agentSlugFromFile } = require('../../lib/session_new');
+
+// --- precondition guard ---
+
+const hasTmux = spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status === 0;
+const hasCodex = spawnSync('codex', ['--version'], { encoding: 'utf8' }).status === 0;
+const missingDep = !hasTmux ? 'tmux not installed' : !hasCodex ? 'codex not installed' : false;
+
+// --- helpers ---
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function makeGitRepo(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  spawnSync('git', ['init', dir], { encoding: 'utf8' });
+  spawnSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com'], { encoding: 'utf8' });
+  spawnSync('git', ['-C', dir, 'config', 'user.name', 'Test'], { encoding: 'utf8' });
+  fs.writeFileSync(path.join(dir, 'README.md'), '# test\n');
+  spawnSync('git', ['-C', dir, 'add', '.'], { encoding: 'utf8' });
+  spawnSync('git', ['-C', dir, 'commit', '-m', 'init'], { encoding: 'utf8' });
+}
+
+function runSessionNew(args) {
+  return spawnSync(path.join(BIN, 'session_new'), args, {
+    encoding: 'utf8',
+    timeout: 90000,
+  });
+}
+
+function extractSessionId(stdout) {
+  const match = String(stdout || '').match(/Started tmux session: (.+)/);
+  return match ? match[1].trim() : null;
+}
+
+function tmuxHasSession(id) {
+  return spawnSync('tmux', ['has-session', '-t', id], { encoding: 'utf8' }).status === 0;
+}
+
+function tmuxKillIfExists(id) {
+  if (id && tmuxHasSession(id)) {
+    spawnSync('tmux', ['kill-session', '-t', id], { encoding: 'utf8' });
+  }
+}
+
+function tmuxCapture(id, lines = 200) {
+  const out = spawnSync(
+    'tmux', ['capture-pane', '-t', `${id}:0.0`, '-p', '-S', `-${lines}`],
+    { encoding: 'utf8' },
+  );
+  return out.status === 0 ? String(out.stdout || '') : '';
+}
+
+function waitForTmuxContent(id, re, tries = 20, delayMs = 500) {
+  for (let i = 0; i < tries; i++) {
+    if (re.test(tmuxCapture(id))) return true;
+    sleep(delayMs);
+  }
+  return false;
+}
+
+// --- tests ---
+
+test('session_new starts a tmux session with codex', { skip: missingDep, timeout: 120000 }, () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  let sessionId = null;
+  try {
+    const taskFile = addTask(boardDir, 'e2e test task', [
+      '--workspace', workspaceDir,
+      '--workspace_type', 'local',
+    ]);
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+    ]);
+    assert.equal(out.status, 0, `session_new failed:\n${out.stderr}`);
+    assert.match(out.stdout, /Started tmux session:/);
+    sessionId = extractSessionId(out.stdout);
+    assert.ok(sessionId, 'should extract session ID from stdout');
+    assert.ok(tmuxHasSession(sessionId), `tmux session should exist: ${sessionId}`);
+    assert.ok(
+      waitForTmuxContent(sessionId, /codex|›/i),
+      'codex output should appear in pane',
+    );
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(boardDir);
+    cleanup(workspaceDir);
+  }
+});
+
+test('session_new creates git worktree and starts session', { skip: missingDep, timeout: 120000 }, () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
+  let sessionId = null;
+  try {
+    makeGitRepo(repoDir);
+    // workspace_type defaults to 'worktree' in the swe preset schema
+    const taskFile = addTask(boardDir, 'worktree task', [
+      '--workspace', repoDir,
+    ]);
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+    ]);
+    assert.equal(out.status, 0, `session_new failed:\n${out.stderr}`);
+    assert.match(out.stdout, /Started tmux session:/);
+    sessionId = extractSessionId(out.stdout);
+    assert.ok(tmuxHasSession(sessionId), `tmux session should exist: ${sessionId}`);
+
+    // task YAML should be updated with the worktree path
+    const taskContent = fs.readFileSync(taskFile, 'utf8');
+    assert.match(taskContent, /\.konby-worktrees/, 'workspace should point into .konby-worktrees');
+
+    // worktree directory should exist on disk
+    const wsMatch = taskContent.match(/^workspace:\s*(.+)$/m);
+    assert.ok(wsMatch, 'task YAML should have workspace field');
+    const worktreeDir = wsMatch[1].trim().replace(/^['"]|['"]$/g, '');
+    assert.ok(fs.existsSync(worktreeDir), `worktree dir should exist: ${worktreeDir}`);
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(boardDir);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test('session_new fails when tmux session already exists', { skip: missingDep, timeout: 180000 }, () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  const sessionTs = '20250101T000000Z';
+  let sessionId = null;
+  try {
+    const taskFile = addTask(boardDir, 'duplicate session task', [
+      '--workspace', workspaceDir,
+      '--workspace_type', 'local',
+    ]);
+
+    // Kill any stale session from a previous run with the same deterministic ID
+    const staleId = sessionIdForTask(agentSlugFromFile('agents/coder.yaml'), taskFile, sessionTs);
+    tmuxKillIfExists(staleId);
+
+    const baseArgs = [
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+      '--session-ts', sessionTs,
+    ];
+
+    const first = runSessionNew(baseArgs);
+    assert.equal(first.status, 0, `first session_new failed:\n${first.stderr}`);
+    sessionId = extractSessionId(first.stdout);
+
+    const second = runSessionNew(baseArgs);
+    assert.notEqual(second.status, 0, 'second call with same session-ts should fail');
+    assert.match(second.stderr, /tmux session already exists/i);
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(boardDir);
+    cleanup(workspaceDir);
+  }
+});
+
+test('session_new fails when task file does not exist', { skip: missingDep }, () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  try {
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', '/tmp/konby-no-such-task.yaml',
+      '--board', boardDir,
+    ]);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /Task file not found/i);
+  } finally {
+    cleanup(boardDir);
+  }
+});
+
+test('session_new fails when agent file does not exist', { skip: missingDep }, () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  try {
+    const taskFile = addTask(boardDir, 'missing agent task', [
+      '--workspace', workspaceDir,
+      '--workspace_type', 'local',
+    ]);
+    const out = runSessionNew([
+      '--agent', 'agents/no-such-agent.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+    ]);
+    assert.notEqual(out.status, 0);
+    assert.match(out.stderr, /Agent file not found/i);
+  } finally {
+    cleanup(boardDir);
+    cleanup(workspaceDir);
+  }
+});
