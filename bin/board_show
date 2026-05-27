@@ -6,6 +6,22 @@ const { spawnSync } = require('child_process');
 const { listTaskSessions, sessionIdPrefix } = require('../lib/tmux_sessions');
 const { resolveBoardDir } = require('../lib/workdir');
 const { loadYaml, formatYaml, saveYaml } = require('../lib/yaml');
+const { readAgentNames, readSchemaEnum } = require('../lib/board_show_io');
+const {
+  appendMoveComment,
+  buildMoveOptionsFromData,
+  buildTasksByColumn,
+  clampScrollOffset,
+  moveSelection,
+  nextMoveField,
+  normalizeSelection,
+  parseBoardShowArgs,
+  parseMouseWheelDelta,
+  renderBoard,
+  renderTaskDetails,
+  selectedTask,
+  uniqInOrder,
+} = require('../lib/board_show');
 
 function locateDispatch(projectDir) {
   const candidates = ['dispatch.yaml'];
@@ -37,45 +53,6 @@ function readTasks(tasksDir) {
     .sort((a, b) => a.file.localeCompare(b.file));
 }
 
-function truncate(text, maxLen) {
-  const value = String(text);
-  if (maxLen <= 1) return value.slice(0, maxLen);
-  if (value.length <= maxLen) return value;
-  return `${value.slice(0, maxLen - 1)}…`;
-}
-
-function wrapText(text, maxLen) {
-  const value = String(text);
-  if (maxLen <= 0) return [value];
-  const out = [];
-  for (let i = 0; i < value.length; i += maxLen) out.push(value.slice(i, i + maxLen));
-  return out.length > 0 ? out : [''];
-}
-
-function taskLabel(task) {
-  const raw = String(task.id || '');
-  const match = raw.match(/^(\d+)/);
-  const shortId = match ? match[1] : raw;
-  const title = task.title && String(task.title).trim() ? String(task.title).trim() : raw;
-  return `#${shortId} - ${title}`;
-}
-
-function buildTasksByColumn(columns, tasks) {
-  const tasksByColumn = new Map(columns.map((c) => [c.name, []]));
-  const unknown = [];
-  for (const task of tasks) {
-    const col = task.column;
-    if (!col) unknown.push(task);
-    else if (tasksByColumn.has(col)) tasksByColumn.get(col).push(task);
-    else unknown.push(task);
-  }
-  if (unknown.length > 0) {
-    if (!tasksByColumn.has('unmapped')) tasksByColumn.set('unmapped', []);
-    tasksByColumn.get('unmapped').push(...unknown);
-  }
-  return tasksByColumn;
-}
-
 function loadBoard(projectDir) {
   const dispatchFile = locateDispatch(projectDir);
   const cfg = loadYaml(dispatchFile);
@@ -85,164 +62,6 @@ function loadBoard(projectDir) {
   const tasks = readTasks(tasksDir);
   const tasksByColumn = buildTasksByColumn(columns, tasks);
   return { dispatchFile, tasksDir, columns, tasksByColumn, tasks };
-}
-
-function visibleColumns(state) {
-  const cols = [...state.columns];
-  if (state.tasksByColumn.has('unmapped')) cols.push({ name: 'unmapped', wip_limit: '-' });
-  return cols;
-}
-
-function normalizeSelection(stateRef) {
-  const cols = visibleColumns(stateRef.board);
-  if (cols.length === 0) {
-    stateRef.selectedCol = 0;
-    stateRef.selectedTask = 0;
-    return;
-  }
-  if (stateRef.selectedCol >= cols.length) stateRef.selectedCol = cols.length - 1;
-  if (stateRef.selectedCol < 0) stateRef.selectedCol = 0;
-
-  const selectedColName = cols[stateRef.selectedCol].name;
-  const tasks = stateRef.board.tasksByColumn.get(selectedColName) || [];
-  if (tasks.length === 0) stateRef.selectedTask = 0;
-  else {
-    if (stateRef.selectedTask >= tasks.length) stateRef.selectedTask = tasks.length - 1;
-    if (stateRef.selectedTask < 0) stateRef.selectedTask = 0;
-  }
-}
-
-function selectedTask(stateRef) {
-  const cols = visibleColumns(stateRef.board);
-  if (!cols[stateRef.selectedCol]) return null;
-  const tasks = stateRef.board.tasksByColumn.get(cols[stateRef.selectedCol].name) || [];
-  if (tasks.length === 0) return null;
-  return tasks[stateRef.selectedTask] || null;
-}
-
-function ansiInverse(text) {
-  return `\x1b[7m${text}\x1b[0m`;
-}
-
-function renderBoard(stateRef) {
-  const state = stateRef.board;
-  const cols = visibleColumns(state);
-  const totalWidth = process.stdout.columns || 120;
-  const gap = 2;
-  const colCount = Math.max(cols.length, 1);
-  const colWidth = Math.max(24, Math.floor((totalWidth - gap * (colCount - 1)) / colCount));
-
-  const header = `KANBAN  ${new Date().toLocaleString()}  config=${path.basename(state.dispatchFile)}  (Ctrl+C to quit)`;
-  const lines = [truncate(header, totalWidth)];
-  lines.push('Hotkeys: a - add new task | d - dispatch once | arrows - select task');
-  lines.push('Hotkeys for a task: m - move | t - open tmux | p - PR | g - merge | x - archive');
-  lines.push('');
-
-  const colLines = cols.map((col, colIndex) => {
-    const tasks = state.tasksByColumn.get(col.name) || [];
-    const limit = col.wip_limit === undefined ? '-' : String(col.wip_limit);
-    const title = `${col.name} [${tasks.length}/${limit}]`;
-    const out = [truncate(title, colWidth), '-'.repeat(colWidth)];
-
-    for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
-      const task = tasks[taskIndex];
-      const selected = colIndex === stateRef.selectedCol && taskIndex === stateRef.selectedTask;
-      const taskLines = [
-        ...wrapText(taskLabel(task), colWidth),
-        truncate(`@${task.assignee} / ${task.status}`, colWidth),
-      ];
-      for (let i = 0; i < taskLines.length; i += 1) {
-        const line = taskLines[i];
-        out.push(selected ? ansiInverse(line.padEnd(colWidth, ' ')) : line);
-      }
-      out.push('');
-    }
-
-    if (tasks.length === 0) out.push('(empty)');
-    return out;
-  });
-
-  const maxHeight = Math.max(...colLines.map((x) => x.length));
-  for (let i = 0; i < maxHeight; i += 1) {
-    const rowParts = colLines.map((col) => {
-      const chunk = col[i] || '';
-      if (chunk.includes('\x1b[')) return chunk;
-      return chunk.padEnd(colWidth, ' ');
-    });
-    lines.push(rowParts.join(' '.repeat(gap)).replace(/\s+$/, ''));
-  }
-
-  if (stateRef.message) lines.push(`Status: ${stateRef.message}`);
-  if (stateRef.mode === 'move') {
-    lines.push('');
-    lines.push('Move task: (↑/↓ switch field, ←/→ select value, Enter save, Esc cancel)');
-    const marker = (field) => (stateRef.moveField === field ? '>' : ' ');
-    lines.push(`${marker('column')} column: ${stateRef.moveDraft.column}`);
-    lines.push(`${marker('status')} status: ${stateRef.moveDraft.status}`);
-    lines.push(`${marker('assignee')} assignee: ${stateRef.moveDraft.assignee}`);
-    lines.push(`${marker('comment')} comment (optional):`);
-    const commentLines = String(stateRef.moveDraft.comment || '').split('\n');
-    if (commentLines.length === 1 && commentLines[0] === '') {
-      lines.push('  (empty)');
-    } else {
-      for (const line of commentLines) lines.push(`  ${line}`);
-    }
-    lines.push('Tip: paste multi-line text from clipboard directly into comment.');
-  }
-  if (stateRef.mode === 'add') {
-    lines.push('');
-    lines.push('Add task popup (Enter save, Esc cancel):');
-    lines.push(`title: ${stateRef.addBuffer}`);
-  }
-  if (stateRef.mode === 'confirm_merge') {
-    const task = selectedTask(stateRef);
-    lines.push('');
-    lines.push(`Confirm merge for ${task ? task.file : 'selected task'}? (y/Enter = yes, n/Esc = no)`);
-  }
-
-  return lines.join('\n');
-}
-
-function renderTaskDetails(stateRef) {
-  const task = selectedTask(stateRef);
-  const totalWidth = process.stdout.columns || 120;
-  const height = process.stdout.rows || 40;
-  const bodyHeight = Math.max(5, height - 6);
-  const lines = [];
-  const header = `TASK  ${task ? task.file : '(not found)'}  (Esc to board)`;
-  lines.push(truncate(header, totalWidth));
-  lines.push('Hotkeys for a task: m - move | t - open tmux | p - PR | g - merge | x - archive');
-  lines.push('');
-
-  if (!task) {
-    lines.push('Task not found.');
-    return lines.join('\n');
-  }
-
-  const details = formatYaml(task.data).split('\n');
-  const maxOffset = Math.max(0, details.length - bodyHeight);
-  if (stateRef.detailsScroll > maxOffset) stateRef.detailsScroll = maxOffset;
-  if (stateRef.detailsScroll < 0) stateRef.detailsScroll = 0;
-  const slice = details.slice(stateRef.detailsScroll, stateRef.detailsScroll + bodyHeight);
-  for (const line of slice) lines.push(truncate(line, totalWidth));
-
-  if (details.length > bodyHeight) {
-    lines.push('');
-    lines.push(`Scroll: ${stateRef.detailsScroll + 1}-${Math.min(stateRef.detailsScroll + bodyHeight, details.length)} / ${details.length}`);
-  }
-  if (stateRef.message) lines.push(`Status: ${stateRef.message}`);
-  if (stateRef.mode === 'comment') {
-    lines.push('');
-    lines.push('Add comment (Enter save, Esc cancel):');
-    lines.push(`text: ${stateRef.commentBuffer}`);
-  }
-  if (stateRef.mode === 'confirm_merge') {
-    const task = selectedTask(stateRef);
-    lines.push('');
-    lines.push(`Confirm merge for ${task ? task.file : 'selected task'}? (y/Enter = yes, n/Esc = no)`);
-  }
-
-  return lines.join('\n');
 }
 
 function snapshotInputs(projectDir) {
@@ -284,8 +103,8 @@ function refreshBoard(stateRef) {
 function redraw(stateRef) {
   try {
     const output = stateRef.mode === 'details' || stateRef.mode === 'comment'
-      ? renderTaskDetails(stateRef)
-      : renderBoard(stateRef);
+      ? renderTaskDetails(stateRef, { width: process.stdout.columns || 120, height: process.stdout.rows || 40 })
+      : renderBoard(stateRef, { width: process.stdout.columns || 120 });
     process.stdout.write('\x1b[H\x1b[J');
     process.stdout.write(`${output}\n`);
   } catch (err) {
@@ -297,33 +116,6 @@ function redraw(stateRef) {
 function setMessage(stateRef, text) {
   stateRef.message = text;
   stateRef.messageAt = Date.now();
-}
-
-function moveSelection(stateRef, dx, dy) {
-  const cols = visibleColumns(stateRef.board);
-  if (cols.length === 0) return;
-
-  if (dx !== 0) {
-    const step = dx > 0 ? 1 : -1;
-    let nextCol = stateRef.selectedCol + step;
-    let movedToNonEmpty = false;
-    while (nextCol >= 0 && nextCol < cols.length) {
-      const nextTasks = stateRef.board.tasksByColumn.get(cols[nextCol].name) || [];
-      if (nextTasks.length > 0) {
-        stateRef.selectedCol = nextCol;
-        movedToNonEmpty = true;
-        break;
-      }
-      nextCol += step;
-    }
-    if (!movedToNonEmpty) return;
-  } else {
-    stateRef.selectedCol = Math.max(0, Math.min(cols.length - 1, stateRef.selectedCol));
-  }
-
-  const tasks = stateRef.board.tasksByColumn.get(cols[stateRef.selectedCol].name) || [];
-  if (tasks.length === 0) stateRef.selectedTask = 0;
-  else stateRef.selectedTask = Math.max(0, Math.min(tasks.length - 1, stateRef.selectedTask + dy));
 }
 
 function runScriptOrThrow(scriptName, args) {
@@ -400,69 +192,11 @@ function startMovePopup(stateRef) {
   }
 }
 
-function uniqSorted(values) {
-  return [...new Set(values.filter(Boolean).map((v) => String(v)))].sort((a, b) => a.localeCompare(b));
-}
-
-function uniqInOrder(values) {
-  const seen = new Set();
-  const out = [];
-  for (const raw of values) {
-    if (raw === undefined || raw === null || raw === '') continue;
-    const v = String(raw);
-    if (seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-function readAgentNames(projectDir) {
-  const agentsDir = path.join(projectDir, 'agents');
-  try {
-    return fs.readdirSync(agentsDir)
-      .filter((f) => /\.ya?ml$/i.test(f))
-      .map((f) => f.replace(/\.ya?ml$/i, ''))
-      .filter(Boolean);
-  } catch (_) {
-    return [];
-  }
-}
-
-function readSchemaEnum(projectDir, propertyName) {
-  const schemaPath = path.join(projectDir, 'task.schema.yaml');
-  try {
-    const schema = loadYaml(schemaPath);
-    const values = schema
-      && schema.properties
-      && schema.properties[propertyName]
-      && Array.isArray(schema.properties[propertyName].enum)
-      ? schema.properties[propertyName].enum
-      : [];
-    return uniqInOrder(values);
-  } catch (_) {
-    return [];
-  }
-}
-
 function buildMoveOptions(stateRef) {
-  const dispatchColumns = uniqInOrder(
-    (stateRef.board && Array.isArray(stateRef.board.columns) ? stateRef.board.columns : [])
-      .map((c) => c && c.name)
-  );
+  const columns = stateRef.board && Array.isArray(stateRef.board.columns) ? stateRef.board.columns : [];
   const schemaStatuses = readSchemaEnum(stateRef.projectDir, 'status');
-  const agentsFromDir = uniqInOrder(readAgentNames(stateRef.projectDir));
-  const assignees = uniqInOrder(['-', ...agentsFromDir]);
-  return {
-    column: dispatchColumns,
-    status: schemaStatuses.length > 0 ? schemaStatuses : ['todo', 'in_progress', 'blocked', 'review', 'done'],
-    assignee: assignees.length > 0 ? assignees : ['-', 'bsa', 'coder', 'qa'],
-  };
-}
-
-function appendMoveComment(stateRef, text) {
-  if (!text) return;
-  stateRef.moveDraft.comment += String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const agentsFromDir = readAgentNames(stateRef.projectDir);
+  return buildMoveOptionsFromData(columns, schemaStatuses, agentsFromDir);
 }
 
 function handleMoveInput(stateRef, key) {
@@ -472,23 +206,11 @@ function handleMoveInput(stateRef, key) {
     return;
   }
   if (key === '\u001b[A') {
-    stateRef.moveField = stateRef.moveField === 'column'
-      ? 'comment'
-      : stateRef.moveField === 'status'
-        ? 'column'
-        : stateRef.moveField === 'assignee'
-          ? 'status'
-          : 'assignee';
+    stateRef.moveField = nextMoveField(stateRef.moveField, -1);
     return;
   }
   if (key === '\u001b[B') {
-    stateRef.moveField = stateRef.moveField === 'column'
-      ? 'status'
-      : stateRef.moveField === 'status'
-        ? 'assignee'
-        : stateRef.moveField === 'assignee'
-          ? 'comment'
-          : 'column';
+    stateRef.moveField = nextMoveField(stateRef.moveField, 1);
     return;
   }
   if (stateRef.moveField === 'comment') {
@@ -624,22 +346,7 @@ function scrollDetails(stateRef, delta) {
   if (!task) return;
   const detailsLines = formatYaml(task.data).split('\n').length;
   const bodyHeight = Math.max(5, (process.stdout.rows || 40) - 6);
-  const maxOffset = Math.max(0, detailsLines - bodyHeight);
-  stateRef.detailsScroll = Math.max(0, Math.min(maxOffset, stateRef.detailsScroll + delta));
-}
-
-function parseMouseWheelDelta(key) {
-  if (typeof key !== 'string') return 0;
-  const up = /\x1b\[<64;\d+;\d+[mM]/.test(key);
-  const down = /\x1b\[<65;\d+;\d+[mM]/.test(key);
-  if (up) return -3;
-  if (down) return 3;
-  return 0;
-}
-
-function sessionIdForTask(task) {
-  const agent = String(task.assignee || '').trim();
-  return sessionIdPrefix(agent, task.file);
+  stateRef.detailsScroll = clampScrollOffset(stateRef.detailsScroll, delta, detailsLines, bodyHeight);
 }
 
 function tmuxSessionExists(sessionId) {
@@ -658,24 +365,24 @@ function openTaskTmux(stateRef) {
     setMessage(stateRef, 'Task has no assignee agent');
     return;
   }
-  const sessionIdPrefix = sessionIdForTask(task);
+  const sessionId = sessionIdPrefix(agent, task.file);
   const sessions = listTaskSessions(task.file, { agent, includeLegacyPrefix: true });
   // Prefer the freshest tmux session matching the task prefix.
   // Fallback to exact (legacy) session id without timestamp suffix.
-  const sessionId = sessions.length > 0
+  const targetSessionId = sessions.length > 0
     ? sessions[0].name
-    : (tmuxSessionExists(sessionIdPrefix) ? sessionIdPrefix : '');
-  if (!sessionId) {
-    setMessage(stateRef, `tmux session not found for task: ${sessionIdPrefix}`);
+    : (tmuxSessionExists(sessionId) ? sessionId : '');
+  if (!targetSessionId) {
+    setMessage(stateRef, `tmux session not found for task: ${sessionId}`);
     return;
   }
 
   process.stdin.setRawMode(false);
   process.stdout.write('\x1Bc');
-  process.stdout.write(`Opening tmux session: ${sessionId}\n`);
+  process.stdout.write(`Opening tmux session: ${targetSessionId}\n`);
   spawnSync('tmux', ['bind-key', '-n', 'C-]', 'detach-client'], { encoding: 'utf8' });
-  spawnSync('tmux', ['set-option', '-t', sessionId, 'status-right', 'Back to kanban board: Ctrl+]'], { encoding: 'utf8' });
-  const out = spawnSync('tmux', ['attach-session', '-t', sessionId], { stdio: 'inherit' });
+  spawnSync('tmux', ['set-option', '-t', targetSessionId, 'status-right', 'Back to kanban board: Ctrl+]'], { encoding: 'utf8' });
+  const out = spawnSync('tmux', ['attach-session', '-t', targetSessionId], { stdio: 'inherit' });
   process.stdin.setRawMode(true);
   process.stdin.resume();
 
@@ -684,7 +391,7 @@ function openTaskTmux(stateRef) {
     setMessage(stateRef, `Failed to open tmux: ${err}`);
     return;
   }
-  setMessage(stateRef, `Returned from tmux: ${sessionId}`);
+  setMessage(stateRef, `Returned from tmux: ${targetSessionId}`);
 }
 
 function runDispatchOnce(stateRef) {
@@ -742,32 +449,10 @@ function handleConfirmMergeInput(stateRef, key) {
 }
 
 function main() {
-  const argv = process.argv.slice(2);
-  let boardPathHint;
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (token === '--help' || token === '-h') {
-      process.stdout.write('Usage: board_show [path] [--board <path>]\n');
-      return;
-    }
-    if (token === '--board') {
-      const next = argv[i + 1];
-      if (!next) throw new Error('Missing value after --board');
-      boardPathHint = next;
-      i += 1;
-      continue;
-    }
-    if (token.startsWith('--board=')) {
-      boardPathHint = token.slice('--board='.length);
-      continue;
-    }
-    if (token.startsWith('-')) {
-      throw new Error(`Unknown argument: ${token}`);
-    }
-    if (boardPathHint !== undefined) {
-      throw new Error('Usage: board_show [path] [--board <path>]');
-    }
-    boardPathHint = token;
+  const { help, boardPathHint } = parseBoardShowArgs(process.argv.slice(2));
+  if (help) {
+    process.stdout.write('Usage: board_show [path] [--board <path>]\n');
+    return;
   }
   const projectDir = resolveBoardDir({ startDir: process.env.PWD || process.cwd(), pathHint: boardPathHint });
 

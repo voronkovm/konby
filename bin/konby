@@ -1,41 +1,44 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env node
 
-SOURCE_PATH="${BASH_SOURCE[0]}"
-while [ -L "$SOURCE_PATH" ]; do
-  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
-  SOURCE_PATH="$(readlink "$SOURCE_PATH")"
-  [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="$SOURCE_DIR/$SOURCE_PATH"
-done
-SOURCE_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
 
-KONBY_HOME="$(cd "$SOURCE_DIR/.." && pwd)"
-KONBY_BIN_DIR="$KONBY_HOME/bin"
-KONBY_VERSION="$(node -e "console.log(require(process.argv[1]).version)" "$KONBY_HOME/package.json" 2>/dev/null || echo "unknown")"
+const KONBY_HOME = path.join(__dirname, '..');
+const KONBY_BIN_DIR = __dirname;
 
-usage() {
-  cat <<'USAGE' | sed "s/__KONBY_VERSION__/${KONBY_VERSION}/"
-konby - streamline teams of agents using kanban boards
-version: __KONBY_VERSION__
+function konbyVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(KONBY_HOME, 'package.json'), 'utf8'));
+    return pkg.version || 'unknown';
+  } catch (_) {
+    return 'unknown';
+  }
+}
+
+function usage() {
+  const version = konbyVersion();
+  process.stdout.write(`konby - streamline teams of agents using kanban boards
+version: ${version}
 
 Usage steps:
   1. Create a new board:
-    `konby board new <path> [--preset <name>] [--workspace <path>] [--force]`
+    \`konby board new <path> [--preset <name>] [--workspace <path>] [--force]\`
 
   2. Adjust rules if needed:
     - board structure and dispatching rules in <path>/dispatch.yaml
-    - agents roles in<path>/agents/*.yaml 
+    - agents roles in<path>/agents/*.yaml
 
   3. Add a task to the board (stored in <path>/tasks/*.yml):
-    `konby task add --title "..." [--board <path>]`
-    `konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>]`
-    `konby task comment <task-file> "<comment>"`
+    \`konby task add --title "..." [--board <path>]\`
+    \`konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>]\`
+    \`konby task comment <task-file> "<comment>"\`
 
   4. Run dispatcher continuously in background loop:
-    `konby dispatchd [--log-file <path>] [--board <path>]`
-    
+    \`konby dispatchd [--log-file <path>] [--board <path>]\`
+
   5. Watch tasks getting done:
-    `konby board show [--board <path>]`
+    \`konby board show [--board <path>]\`
 
 Additional commands:
   konby help
@@ -58,154 +61,133 @@ Examples:
   konby task move ./my-board/tasks/10-login.yml --column in_progress --status in_progress --assignee coder --comment "Picked up for implementation"
   konby task comment ./my-board/tasks/10-login.yml "Need clarification on acceptance criteria"
   konby dispatchd --log-file /tmp/konby-dispatchd.log --board ./my-board
-USAGE
+`);
 }
 
-err() {
-  echo "Error: $*" >&2
-  exit 1
+function err(msg) {
+  process.stderr.write(`Error: ${msg}\n`);
+  process.exit(1);
 }
 
-ensure_path() {
-  local shell_name="$1"
-  local rc_file
-
-  case "$shell_name" in
-    zsh) rc_file="$HOME/.zshrc" ;;
-    bash) rc_file="$HOME/.bashrc" ;;
-    *) err "Unsupported shell: $shell_name (expected zsh or bash)" ;;
-  esac
-
-  local line="export PATH=\"$KONBY_BIN_DIR:\$PATH\""
-  touch "$rc_file"
-
-  if grep -Fq "$line" "$rc_file"; then
-    echo "PATH already configured in $rc_file"
-  else
-    echo "$line" >> "$rc_file"
-    echo "Added to $rc_file: $line"
-  fi
-
-  export PATH="$KONBY_BIN_DIR:$PATH"
-  echo "PATH updated for current shell process."
+function run(scriptName, args) {
+  const scriptPath = path.join(KONBY_BIN_DIR, scriptName);
+  const result = spawnSync(scriptPath, args, { stdio: 'inherit' });
+  process.exit(result.status ?? 1);
 }
 
-cmd_install() {
-  local shell_name="zsh"
-  local board_name=""
-  local target_dir="$(pwd)"
-  local preset_name="swe"
+function ensurePath(shellName) {
+  let rcFile;
+  if (shellName === 'zsh') rcFile = path.join(process.env.HOME, '.zshrc');
+  else if (shellName === 'bash') rcFile = path.join(process.env.HOME, '.bashrc');
+  else err(`Unsupported shell: ${shellName} (expected zsh or bash)`);
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --shell)
-        shift
-        [[ $# -gt 0 ]] || err "Missing value after --shell"
-        shell_name="$1"
-        ;;
-      --board)
-        shift
-        [[ $# -gt 0 ]] || err "Missing value after --board"
-        board_name="$1"
-        ;;
-      --dir)
-        shift
-        [[ $# -gt 0 ]] || err "Missing value after --dir"
-        target_dir="$1"
-        ;;
-      --preset)
-        shift
-        [[ $# -gt 0 ]] || err "Missing value after --preset"
-        preset_name="$1"
-        ;;
-      *) err "Unknown option for install: $1" ;;
-    esac
-    shift
-  done
+  const line = `export PATH="${KONBY_BIN_DIR}:$PATH"`;
+  if (!fs.existsSync(rcFile)) fs.writeFileSync(rcFile, '');
+  const content = fs.readFileSync(rcFile, 'utf8');
+  if (content.includes(line)) {
+    process.stdout.write(`PATH already configured in ${rcFile}\n`);
+  } else {
+    fs.appendFileSync(rcFile, `\n${line}\n`);
+    process.stdout.write(`Added to ${rcFile}: ${line}\n`);
+  }
 
-  ensure_path "$shell_name"
-
-  if [[ -n "$board_name" ]]; then
-    "$KONBY_BIN_DIR/board_new" "$target_dir/$board_name" --preset "$preset_name"
-  fi
-
-  echo "If command is not found in your current terminal, run: source ~/.${shell_name}rc"
+  process.env.PATH = `${KONBY_BIN_DIR}:${process.env.PATH}`;
+  process.stdout.write('PATH updated for current shell process.\n');
 }
 
-main() {
-  [[ $# -gt 0 ]] || { usage; exit 0; }
+function cmdInstall(argv) {
+  let shellName = 'zsh';
+  let boardName = '';
+  let targetDir = process.cwd();
+  let presetName = 'swe';
 
-  case "$1" in
-    help|--help|-h)
-      usage
-      ;;
-    install)
-      shift
-      cmd_install "$@"
-      ;;
-    board)
-      shift
-      [[ $# -gt 0 ]] || err "Usage: konby board <new|show> ..."
-      case "$1" in
-        new)
-          shift
-          "$KONBY_BIN_DIR/board_new" "$@"
-          ;;
-        show)
-          shift
-          "$KONBY_BIN_DIR/board_show" "$@"
-          ;;
-        *) err "Unknown board subcommand: $1" ;;
-      esac
-      ;;
-    task)
-      shift
-      [[ $# -gt 0 ]] || err "Usage: konby task <add|move|comment|pr|merge> ..."
-      case "$1" in
-        add)
-          shift
-          "$KONBY_BIN_DIR/task_add" "$@"
-          ;;
-        move)
-          shift
-          "$KONBY_BIN_DIR/task_move" "$@"
-          ;;
-        comment)
-          shift
-          "$KONBY_BIN_DIR/task_comment" "$@"
-          ;;
-        pr)
-          shift
-          "$KONBY_BIN_DIR/task_pr" "$@"
-          ;;
-        merge)
-          shift
-          "$KONBY_BIN_DIR/task_merge" "$@"
-          ;;
-        *) err "Unknown task subcommand: $1" ;;
-      esac
-      ;;
-    session)
-      shift
-      [[ $# -gt 0 ]] || err "Usage: konby session new ..."
-      case "$1" in
-        new)
-          shift
-          "$KONBY_BIN_DIR/session_new" "$@"
-          ;;
-        *) err "Unknown session subcommand: $1" ;;
-      esac
-      ;;
-    dispatch)
-      shift
-      "$KONBY_BIN_DIR/dispatch" "$@"
-      ;;
-    dispatchd)
-      shift
-      "$KONBY_BIN_DIR/dispatchd" "$@"
-      ;;
-    *) err "Unknown command: $1" ;;
-  esac
+  for (let i = 0; i < argv.length; i++) {
+    switch (argv[i]) {
+      case '--shell':
+        if (!argv[i + 1]) err('Missing value after --shell');
+        shellName = argv[++i];
+        break;
+      case '--board':
+        if (!argv[i + 1]) err('Missing value after --board');
+        boardName = argv[++i];
+        break;
+      case '--dir':
+        if (!argv[i + 1]) err('Missing value after --dir');
+        targetDir = argv[++i];
+        break;
+      case '--preset':
+        if (!argv[i + 1]) err('Missing value after --preset');
+        presetName = argv[++i];
+        break;
+      default:
+        err(`Unknown option for install: ${argv[i]}`);
+    }
+  }
+
+  ensurePath(shellName);
+
+  if (boardName) {
+    const boardPath = path.join(targetDir, boardName);
+    const boardNewScript = path.join(KONBY_BIN_DIR, 'board_new');
+    const result = spawnSync(boardNewScript, [boardPath, '--preset', presetName], { stdio: 'inherit' });
+    if (result.status !== 0) process.exit(result.status ?? 1);
+  }
+
+  process.stdout.write(`If command is not found in your current terminal, run: source ~/.${shellName}rc\n`);
 }
 
-main "$@"
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0) { usage(); process.exit(0); }
+
+  switch (argv[0]) {
+    case 'help':
+    case '--help':
+    case '-h':
+      usage();
+      break;
+    case 'install':
+      cmdInstall(argv.slice(1));
+      break;
+    case 'board': {
+      const sub = argv[1];
+      if (!sub) err('Usage: konby board <new|show> ...');
+      if (sub === 'new') run('board_new', argv.slice(2));
+      else if (sub === 'show') run('board_show', argv.slice(2));
+      else err(`Unknown board subcommand: ${sub}`);
+      break;
+    }
+    case 'task': {
+      const sub = argv[1];
+      if (!sub) err('Usage: konby task <add|move|comment|pr|merge> ...');
+      if (sub === 'add') run('task_add', argv.slice(2));
+      else if (sub === 'move') run('task_move', argv.slice(2));
+      else if (sub === 'comment') run('task_comment', argv.slice(2));
+      else if (sub === 'pr') run('task_pr', argv.slice(2));
+      else if (sub === 'merge') run('task_merge', argv.slice(2));
+      else err(`Unknown task subcommand: ${sub}`);
+      break;
+    }
+    case 'session': {
+      const sub = argv[1];
+      if (!sub) err('Usage: konby session new ...');
+      if (sub === 'new') run('session_new', argv.slice(2));
+      else err(`Unknown session subcommand: ${sub}`);
+      break;
+    }
+    case 'dispatch':
+      run('dispatch', argv.slice(1));
+      break;
+    case 'dispatchd':
+      run('dispatchd', argv.slice(1));
+      break;
+    default:
+      err(`Unknown command: ${argv[0]}`);
+  }
+}
+
+try {
+  main();
+} catch (e) {
+  err(e.message);
+}

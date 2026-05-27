@@ -1,50 +1,57 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env node
 
-root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-workdir_js="$root_dir/lib/workdir.js"
-log_file="${TMPDIR:-/tmp}/code-conveyor-dispatchd.log"
-board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)")"
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn, spawnSync } = require('child_process');
+const { resolveBoardDir } = require('../lib/workdir');
+const { parseDispatchdArgs } = require('../lib/dispatchd');
 
-usage() {
-  cat <<'USAGE'
-Usage:
-  dispatchd [--log-file <path>] [--board <path>]
-USAGE
+const DEFAULT_LOG_FILE = path.join(os.tmpdir(), 'code-conveyor-dispatchd.log');
+
+function runLoop(dispatchBin, boardDir, logFile) {
+  const out = spawnSync(process.execPath, [dispatchBin, '--board', boardDir], { encoding: 'utf8' });
+  const output = `${out.stdout || ''}${out.stderr || ''}`;
+  if (output.trim()) fs.appendFileSync(logFile, output);
+  setTimeout(() => runLoop(dispatchBin, boardDir, logFile), 5000);
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --board|--dir)
-      [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 1; }
-      board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --path "$2")"
-      shift 2
-      ;;
-    --log-file)
-      [[ $# -ge 2 ]] || { echo "Error: --log-file requires a value" >&2; exit 1; }
-      log_file="$2"
-      shift 2
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Error: Unknown argument: $1" >&2
-      exit 1
-      ;;
-  esac
-done
+function main() {
+  let args;
+  try {
+    args = parseDispatchdArgs(process.argv.slice(2));
+  } catch (e) {
+    process.stderr.write(`Error: ${e.message}\n`);
+    process.exit(1);
+  }
+  if (args.help) {
+    process.stdout.write('Usage:\n  dispatchd [--log-file <path>] [--board <path>]\n');
+    process.exit(0);
+  }
 
-nohup bash -c '
-  set -euo pipefail
-  root_dir="$1"
-  board_dir="$2"
-  log_file="$3"
-  while true; do
-    "$root_dir/bin/dispatch" --board "$board_dir" >> "$log_file" 2>&1 || true
-    sleep 5
-  done
-' _ "$root_dir" "$board_dir" "$log_file" >/dev/null 2>&1 &
+  if (args.daemon) {
+    const dispatchBin = path.join(__dirname, 'dispatch');
+    const logFile = args.logFile || DEFAULT_LOG_FILE;
+    runLoop(dispatchBin, args.board, logFile);
+    return;
+  }
 
-echo "PID: $!"
+  const logFile = args.logFile || DEFAULT_LOG_FILE;
+  const boardDir = resolveBoardDir({ startDir: process.env.PWD || process.cwd(), pathHint: args.board || undefined });
+
+  const logFd = fs.openSync(logFile, 'a');
+  const child = spawn(process.execPath, [
+    __filename,
+    '--daemon',
+    '--board', boardDir,
+    '--log-file', logFile,
+  ], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+  });
+  fs.closeSync(logFd);
+  child.unref();
+  process.stdout.write(`PID: ${child.pid}\n`);
+}
+
+main();

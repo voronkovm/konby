@@ -1,486 +1,261 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env node
 
-usage() {
-  cat <<'USAGE'
-Usage:
-  session_new --agent <agent-file> --task <task-file> [--board <path>]
-              [--transcript <path>] [--session-ts <UTC timestamp>]
-              [--completion-column <column>]
-              [--status-todo <status>] [--status-in-progress <status>]
-              [--status-success <status>] [--status-failure <status>]
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { resolveBoardDir } = require('../lib/workdir');
+const {
+  agentSlugFromFile,
+  buildPrompt,
+  completionColumnValue,
+  defaultTranscriptPath,
+  parseSessionNewArgs,
+  readBlockScalarText,
+  readScalarText,
+  readSchemaPropertyDefaultText,
+  resolveWorkspaceDir,
+  sessionIdForTask,
+  sessionTimestampUtc,
+  statusValues,
+  transcriptAbsPath: transcriptAbsPathFn,
+  transcriptPathRelativeToWorkspace,
+  worktreePlan,
+  yamlEscapeScalar,
+} = require('../lib/session_new');
+const { yamlScalar } = require('../lib/yaml');
 
-Example:
-  session_new --agent agents/bsa.yaml --task tasks/task.yaml
-USAGE
+function err(msg) {
+  process.stderr.write(`Error: ${msg}\n`);
+  process.exit(1);
 }
 
-err() {
-  echo "Error: $*" >&2
-  exit 1
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-workdir_js="$konby_home/lib/workdir.js"
-worktree_js="$konby_home/lib/worktree.js"
-
-agent_input=""
-task_file=""
-board_dir=""
-status_todo_arg=""
-status_in_progress_arg=""
-status_success_arg=""
-status_failure_arg=""
-completion_column_arg=""
-transcript_path_arg=""
-session_ts_arg=""
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --agent)
-      [[ $# -ge 2 ]] || err "--agent requires a value"
-      agent_input="$2"
-      shift 2
-      ;;
-    --task)
-      [[ $# -ge 2 ]] || err "--task requires a value"
-      task_file="$2"
-      shift 2
-      ;;
-    --board|--dir)
-      [[ $# -ge 2 ]] || err "$1 requires a value"
-      board_dir="$2"
-      shift 2
-      ;;
-    --status-todo)
-      [[ $# -ge 2 ]] || err "--status-todo requires a value"
-      status_todo_arg="$2"
-      shift 2
-      ;;
-    --status-in-progress)
-      [[ $# -ge 2 ]] || err "--status-in-progress requires a value"
-      status_in_progress_arg="$2"
-      shift 2
-      ;;
-    --status-success)
-      [[ $# -ge 2 ]] || err "--status-success requires a value"
-      status_success_arg="$2"
-      shift 2
-      ;;
-    --status-failure)
-      [[ $# -ge 2 ]] || err "--status-failure requires a value"
-      status_failure_arg="$2"
-      shift 2
-      ;;
-    --completion-column)
-      [[ $# -ge 2 ]] || err "--completion-column requires a value"
-      completion_column_arg="$2"
-      shift 2
-      ;;
-    --transcript)
-      [[ $# -ge 2 ]] || err "--transcript requires a value"
-      transcript_path_arg="$2"
-      shift 2
-      ;;
-    --session-ts)
-      [[ $# -ge 2 ]] || err "--session-ts requires a value"
-      session_ts_arg="$2"
-      shift 2
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      err "Unknown argument: $1"
-      ;;
-  esac
-done
-
-[[ -n "$agent_input" ]] || err "--agent is required"
-[[ -n "$task_file" ]] || err "--task is required"
-resolve_board_args=(resolve-board --start "$(pwd)" --task "$task_file")
-if [[ -n "$board_dir" ]]; then
-  resolve_board_args+=(--path "$board_dir")
-fi
-board_dir="$(node "$workdir_js" "${resolve_board_args[@]}")"
-board_parent_dir="$(cd "$board_dir/.." && pwd)"
-cd "$board_dir"
-
-[[ -f "$task_file" ]] || err "Task file not found: $task_file"
-
-resolve_agent_file() {
-  local input="$1"
-  [[ "$input" == */* || "$input" == *.yml || "$input" == *.yaml ]] || return 1
-  local candidate="$input"
-  if [[ -f "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  if [[ "$candidate" != *.yml && "$candidate" != *.yaml ]]; then
-    if [[ -f "${candidate}.yaml" ]]; then
-      printf '%s\n' "${candidate}.yaml"
-      return 0
-    fi
-    if [[ -f "${candidate}.yml" ]]; then
-      printf '%s\n' "${candidate}.yml"
-      return 0
-    fi
-  fi
-  return 1
+function tmuxHasSession(sessionId) {
+  return spawnSync('tmux', ['has-session', '-t', sessionId], { encoding: 'utf8' }).status === 0;
 }
 
-if ! agent_file="$(resolve_agent_file "$agent_input")"; then
-  err "Agent file not found: $agent_input"
-fi
+function tmuxCapture(pane, lines = 200) {
+  const out = spawnSync('tmux', ['capture-pane', '-t', pane, '-p', '-S', `-${lines}`], { encoding: 'utf8' });
+  return out.status === 0 ? String(out.stdout || '') : '';
+}
 
-agent_slug="$(basename "$agent_file")"
-agent_slug="${agent_slug%.yaml}"
-agent_slug="${agent_slug%.yml}"
-command -v tmux >/dev/null 2>&1 || err "tmux is not installed"
+function resolveAgentFile(input, boardDir) {
+  if (!input.includes('/') && !input.endsWith('.yml') && !input.endsWith('.yaml')) return null;
+  const base = path.isAbsolute(input) ? input : path.join(boardDir, input);
+  if (fs.existsSync(base)) return base;
+  if (!base.endsWith('.yml') && !base.endsWith('.yaml')) {
+    if (fs.existsSync(`${base}.yaml`)) return `${base}.yaml`;
+    if (fs.existsSync(`${base}.yml`)) return `${base}.yml`;
+  }
+  return null;
+}
 
-# Reads a block scalar, e.g. role: |
-read_block_scalar() {
-  local key="$1"
-  local file="$2"
-  awk -v key="$key" '
-    BEGIN { in_block=0; base_indent=-1 }
-    {
-      if (in_block == 0) {
-        if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*\\|") {
-          in_block=1
-          next
-        }
-      } else {
-        if ($0 ~ /^[[:space:]]*$/) {
-          print ""
-          next
-        }
+function upsertTaskScalar(file, key, value) {
+  const escaped = yamlScalar(String(value));
+  const content = fs.readFileSync(file, 'utf8');
+  const re = new RegExp(`^[ \\t]*${key}:[ \\t]*.*$`, 'm');
+  let newContent;
+  if (re.test(content)) {
+    newContent = content.replace(re, `${key}: ${escaped}`);
+  } else {
+    newContent = `${content.trimEnd()}\n${key}: ${escaped}\n`;
+  }
+  fs.writeFileSync(file, newContent, 'utf8');
+}
 
-        match($0, /^[[:space:]]*/)
-        indent = RLENGTH
+function handleStartupDialogs(pane, cli) {
+  const out = tmuxCapture(pane, 200);
+  if (cli.includes('codex') && /Update available|Release notes: .*codex\/releases\/latest|Update now/i.test(out)) {
+    spawnSync('tmux', ['send-keys', '-t', pane, '-l', '--', '1']);
+    spawnSync('tmux', ['send-keys', '-t', pane, 'C-m']);
+    return true;
+  }
+  if (/Yes, I trust this folder|Do you trust the contents/i.test(out)) {
+    spawnSync('tmux', ['send-keys', '-t', pane, '-l', '--', '1']);
+    spawnSync('tmux', ['send-keys', '-t', pane, 'C-m']);
+    return true;
+  }
+  return false;
+}
 
-        if (base_indent < 0) {
-          base_indent = indent
-        }
+function waitForCliReady(pane, cli, tries = 120, delayMs = 500) {
+  for (let i = 0; i < tries; i++) {
+    if (handleStartupDialogs(pane, cli)) {
+      sleep(delayMs);
+      continue;
+    }
+    const out = tmuxCapture(pane, 200);
+    let ready = false;
+    if (cli.includes('codex')) {
+      ready = /^[ \t]*›[ \t]/m.test(out);
+    } else if (cli.includes('claude')) {
+      ready = /^[ \t]*❯/m.test(out);
+    } else {
+      ready = /^[ \t]*[›❯>][ \t]/m.test(out);
+    }
+    if (ready) return true;
+    sleep(delayMs);
+  }
+  return false;
+}
 
-        if (indent < base_indent) {
-          exit
-        }
+function main() {
+  let args;
+  try {
+    args = parseSessionNewArgs(process.argv.slice(2));
+  } catch (e) {
+    err(e.message);
+  }
 
-        line = substr($0, base_indent + 1)
-        print line
+  if (args.help) {
+    process.stdout.write(
+      'Usage:\n' +
+      '  session_new --agent <agent-file> --task <task-file> [--board <path>]\n' +
+      '              [--transcript <path>] [--session-ts <UTC timestamp>]\n' +
+      '              [--completion-column <column>]\n' +
+      '              [--status-todo <status>] [--status-in-progress <status>]\n' +
+      '              [--status-success <status>] [--status-failure <status>]\n\n' +
+      'Example:\n' +
+      '  session_new --agent agents/bsa.yaml --task tasks/task.yaml\n'
+    );
+    return;
+  }
+
+  const resolveBoardOpts = { startDir: process.env.PWD || process.cwd(), taskFile: args.task };
+  if (args.board) resolveBoardOpts.pathHint = args.board;
+  const boardDir = resolveBoardDir(resolveBoardOpts);
+
+  const taskAbsPath = path.isAbsolute(args.task) ? args.task : path.resolve(boardDir, args.task);
+  if (!fs.existsSync(taskAbsPath)) err(`Task file not found: ${taskAbsPath}`);
+
+  const agentFile = resolveAgentFile(args.agent, boardDir);
+  if (!agentFile) err(`Agent file not found: ${args.agent}`);
+
+  if (spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status !== 0) err('tmux is not installed');
+
+  const agentContent = fs.readFileSync(agentFile, 'utf8');
+  const taskContent = fs.readFileSync(taskAbsPath, 'utf8');
+
+  const roleText = readBlockScalarText(agentContent, 'role');
+  if (!roleText) err(`Could not read role block from ${agentFile}`);
+
+  const cliCmd = readScalarText(agentContent, 'cli');
+  if (!cliCmd) err(`Could not read cli from ${agentFile}`);
+
+  const agentSlug = agentSlugFromFile(agentFile);
+  const statusVals = statusValues(args);
+
+  const taskColumn = readScalarText(taskContent, 'column') || readScalarText(taskContent, 'stage');
+  const completionColumn = completionColumnValue(args.completionColumn, taskColumn);
+
+  let workspaceDir = readScalarText(taskContent, 'workspace');
+  const workspaceType = readScalarText(taskContent, 'workspace_type') || 'local';
+
+  if (!workspaceDir) {
+    const schemaPath = path.join(boardDir, 'task.schema.yaml');
+    if (fs.existsSync(schemaPath)) {
+      workspaceDir = readSchemaPropertyDefaultText(fs.readFileSync(schemaPath, 'utf8'), 'workspace');
+    }
+  }
+
+  workspaceDir = resolveWorkspaceDir({ workspaceDir, schemaWorkspaceDefault: '', boardDir });
+
+  if (workspaceType === 'worktree') {
+    let repoRoot = null;
+    let isWorktreeDir = false;
+
+    const insideTree = spawnSync('git', ['-C', workspaceDir, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
+    if (insideTree.status === 0 && fs.existsSync(workspaceDir)) {
+      const gitPath = spawnSync('git', ['-C', workspaceDir, 'rev-parse', '--git-path', '.'], { encoding: 'utf8' });
+      isWorktreeDir = String(gitPath.stdout || '').includes('/worktrees/');
+      if (!isWorktreeDir) {
+        repoRoot = spawnSync('git', ['-C', workspaceDir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).stdout.trim();
+      }
+    } else {
+      repoRoot = boardDir;
+      if (spawnSync('git', ['-C', repoRoot, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' }).status !== 0) {
+        err(`workspace_dir is not a git repository: ${workspaceDir}`);
       }
     }
-  ' "$file"
-}
 
-read_scalar() {
-  local key="$1"
-  local file="$2"
-  awk -v key="$key" '
-    {
-      if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
-        sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
-        gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
-        print $0
-        exit
+    if (!isWorktreeDir && repoRoot) {
+      const plan = worktreePlan(repoRoot, taskAbsPath);
+      fs.mkdirSync(path.dirname(plan.dir), { recursive: true });
+      if (!fs.existsSync(plan.dir)) {
+        const branchExists = spawnSync('git', ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { encoding: 'utf8' }).status === 0;
+        const wtArgs = branchExists
+          ? ['worktree', 'add', '-f', plan.dir, plan.branch]
+          : ['worktree', 'add', '-f', '-b', plan.branch, plan.dir];
+        spawnSync('git', ['-C', repoRoot, ...wtArgs], { stdio: 'inherit' });
       }
+      workspaceDir = plan.dir;
+      upsertTaskScalar(taskAbsPath, 'workspace', workspaceDir);
     }
-  ' "$file"
+  }
+
+  if (!fs.existsSync(workspaceDir) || !fs.statSync(workspaceDir).isDirectory()) {
+    err(`workspace_dir does not exist or is not a directory: ${workspaceDir}`);
+  }
+
+  const sessionTs = args.sessionTs || sessionTimestampUtc();
+  const sessionId = sessionIdForTask(agentSlug, taskAbsPath, sessionTs);
+  const paneTarget = `${sessionId}:0.0`;
+
+  let transcriptRel = args.transcript;
+  if (!transcriptRel) transcriptRel = defaultTranscriptPath(taskAbsPath, sessionId);
+  const transcriptAbs = transcriptAbsPathFn(boardDir, transcriptRel);
+  const transcriptRelToWorkspace = transcriptPathRelativeToWorkspace(transcriptAbs, workspaceDir);
+
+  if (tmuxHasSession(sessionId)) err(`tmux session already exists: ${sessionId}`);
+
+  const prompt = buildPrompt({
+    roleText,
+    taskText: taskContent,
+    taskAbsPath,
+    completionColumn,
+    successStatus: statusVals.success,
+    failureStatus: statusVals.failure,
+    transcriptPath: transcriptRelToWorkspace,
+    agentSlug,
+  });
+
+  spawnSync('tmux', ['new-session', '-d', '-s', sessionId, '-c', workspaceDir]);
+  spawnSync('tmux', ['set-option', '-t', sessionId, 'mouse', 'on']);
+  spawnSync('tmux', ['set-option', '-t', sessionId, 'set-clipboard', 'on']);
+  spawnSync('tmux', ['bind-key', '-n', 'C-]', 'detach-client']);
+  spawnSync('tmux', ['set-option', '-t', sessionId, 'status-right', 'Back to kanban board: Ctrl+]']);
+
+  const hasPbcopy = spawnSync('which', ['pbcopy'], { encoding: 'utf8' }).status === 0;
+  const hasPbpaste = spawnSync('which', ['pbpaste'], { encoding: 'utf8' }).status === 0;
+  if (hasPbcopy && hasPbpaste) {
+    spawnSync('tmux', ['bind-key', 'p', 'run-shell', 'pbpaste | tmux load-buffer - ; tmux paste-buffer']);
+  }
+
+  sleep(200);
+
+  spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', cliCmd]);
+  spawnSync('tmux', ['send-keys', '-t', paneTarget, 'C-m']);
+
+  if (!waitForCliReady(paneTarget, cliCmd)) {
+    process.stderr.write(`Warning: timed out waiting for CLI input readiness in session ${sessionId}\n`);
+  }
+
+  spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', '\x1b[200~']);
+  spawnSync('tmux', ['set-buffer', '--', prompt]);
+  spawnSync('tmux', ['paste-buffer', '-t', paneTarget]);
+  spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', '\x1b[201~']);
+  spawnSync('tmux', ['send-keys', '-t', paneTarget, 'C-m']);
+
+  if (!tmuxHasSession(sessionId)) err(`tmux session failed to stay alive: ${sessionId}`);
+
+  process.stdout.write(`Started tmux session: ${sessionId}\n`);
 }
 
-read_schema_property_default() {
-  local property="$1"
-  local file="$2"
-  [[ -f "$file" ]] || return 0
-  awk -v property="$property" '
-    BEGIN { in_prop = 0; prop_indent = -1 }
-    $0 ~ "^[[:space:]]*" property ":[[:space:]]*$" {
-      match($0, /^[[:space:]]*/)
-      prop_indent = RLENGTH
-      in_prop = 1
-      next
-    }
-    in_prop && $0 !~ /^[[:space:]]*$/ {
-      match($0, /^[[:space:]]*/)
-      if (RLENGTH <= prop_indent) {
-        in_prop = 0
-      }
-    }
-    in_prop && /^[[:space:]]*default:[[:space:]]*/ {
-      sub(/^[[:space:]]*default:[[:space:]]*/, "", $0)
-      gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
-      print $0
-      exit
-    }
-  ' "$file"
+try {
+  main();
+} catch (e) {
+  err(e.message);
 }
-
-yaml_escape_scalar() {
-  local value="$1"
-  if [[ "$value" =~ ^[A-Za-z0-9_./:@+-]+$ ]]; then
-    printf '%s' "$value"
-    return 0
-  fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    err "python3 is required to update task YAML with non-trivial workspace path"
-  fi
-  python3 - "$value" <<'PY'
-import json
-import sys
-print(json.dumps(sys.argv[1]))
-PY
-}
-
-upsert_task_scalar() {
-  local file="$1"
-  local key="$2"
-  local value="$3"
-  local escaped
-  escaped="$(yaml_escape_scalar "$value")"
-  if grep -qE "^[[:space:]]*${key}:[[:space:]]*" "$file"; then
-    awk -v key="$key" -v value="$escaped" '
-      BEGIN { done = 0 }
-      {
-        if (!done && $0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
-          print key ": " value
-          done = 1
-          next
-        }
-        print
-      }
-    ' "$file" > "${file}.tmp"
-    mv "${file}.tmp" "$file"
-  else
-    printf '\n%s: %s\n' "$key" "$escaped" >> "$file"
-  fi
-}
-
-role_text="$(read_block_scalar role "$agent_file")"
-[[ -n "$role_text" ]] || err "Could not read role block from $agent_file"
-
-cli_cmd="$(read_scalar cli "$agent_file")"
-[[ -n "$cli_cmd" ]] || err "Could not read cli from $agent_file"
-
-completion_column="$completion_column_arg"
-if [[ -z "$completion_column" ]]; then
-  completion_column="$(read_scalar column "$task_file")"
-fi
-if [[ -z "$completion_column" ]]; then
-  completion_column="backlog"
-fi
-task_base="$(basename "$task_file")"
-task_slug="$task_base"
-task_slug="${task_slug%.yml}"
-task_slug="${task_slug%.yaml}"
-status_now="$(read_scalar status "$task_file")"
-if [[ -z "$status_now" ]]; then
-  status_now="todo"
-fi
-todo_status="$status_todo_arg"
-if [[ -z "$todo_status" ]]; then
-  todo_status="todo"
-fi
-in_progress_status="$status_in_progress_arg"
-if [[ -z "$in_progress_status" ]]; then
-  in_progress_status="in_progress"
-fi
-success_status="$status_success_arg"
-if [[ -z "$success_status" ]]; then
-  success_status="done"
-fi
-failure_status="$status_failure_arg"
-if [[ -z "$failure_status" ]]; then
-  failure_status="blocked"
-fi
-workspace_dir="$(read_scalar workspace "$task_file")"
-workspace_type="$(read_scalar workspace_type "$task_file")"
-if [[ -z "$workspace_type" ]]; then
-  workspace_type="local"
-fi
-if [[ -z "$workspace_dir" ]]; then
-  workspace_dir="$(read_schema_property_default workspace "$board_dir/task.schema.yaml")"
-fi
-if [[ -z "$workspace_dir" ]]; then
-  workspace_dir="$board_dir"
-elif [[ "$workspace_dir" != /* ]]; then
-  workspace_dir="$board_dir/$workspace_dir"
-fi
-
-if [[ "$workspace_type" == "worktree" ]]; then
-  if [[ -d "$workspace_dir" ]] && git -C "$workspace_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    is_worktree_dir="$(git -C "$workspace_dir" rev-parse --git-path . 2>/dev/null | grep -c '/worktrees/' || true)"
-    if [[ "$is_worktree_dir" -eq 0 ]]; then
-      repo_root="$(git -C "$workspace_dir" rev-parse --show-toplevel)"
-    fi
-  else
-    repo_root="$board_dir"
-    git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-      || err "workspace_dir is not a git repository: $workspace_dir"
-  fi
-
-  if [[ "${is_worktree_dir:-0}" -eq 0 ]]; then
-    task_branch="$(node "$worktree_js" task-branch --task "$task_file")"
-    task_worktree_dir="$(node "$worktree_js" task-worktree-dir --repo "$repo_root" --task "$task_file")"
-    mkdir -p "$(dirname "$task_worktree_dir")"
-    if [[ ! -d "$task_worktree_dir" ]]; then
-      if git -C "$repo_root" show-ref --verify --quiet "refs/heads/${task_branch}"; then
-        git -C "$repo_root" worktree add -f "$task_worktree_dir" "$task_branch" >/dev/null
-      else
-        git -C "$repo_root" worktree add -f -b "$task_branch" "$task_worktree_dir" >/dev/null
-      fi
-    fi
-    workspace_dir="$task_worktree_dir"
-    upsert_task_scalar "$task_file" workspace "$workspace_dir"
-  fi
-fi
-[[ -d "$workspace_dir" ]] || err "workspace_dir does not exist or is not a directory: $workspace_dir"
-task_abs_path="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
-
-# IMPORTANT SESSION ID INVARIANT:
-# Keep this exact format in sync with bin/dispatch and bin/board_show.
-# "<agent>__<task-slug>__<UTC timestamp>", e.g.:
-# "bsa__1-write-hello-world-py__20260526T050141Z"
-session_id="${agent_slug}__${task_slug}"
-session_ts="$session_ts_arg"
-if [[ -z "$session_ts" ]]; then
-  session_ts="$(date -u +%Y%m%dT%H%M%SZ)"
-fi
-session_id="${session_id}__${session_ts}"
-pane_target="${session_id}:0.0"
-
-transcript_path="$transcript_path_arg"
-if [[ -z "$transcript_path" ]]; then
-  transcript_path="transcripts/${task_slug}/${session_id}.txt"
-fi
-if [[ "$transcript_path" = /* ]]; then
-  transcript_abs_path="$transcript_path"
-else
-  transcript_abs_path="$board_dir/$transcript_path"
-fi
-if command -v python3 >/dev/null 2>&1; then
-  transcript_path="$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$transcript_abs_path" "$workspace_dir")"
-else
-  # Fallback keeps behavior if python3 is unavailable.
-  transcript_path="$transcript_abs_path"
-fi
-
-if tmux has-session -t "$session_id" 2>/dev/null; then
-  err "tmux session already exists: $session_id"
-fi
-
-task_text="$(cat "$task_file")"
-prompt="${role_text}
-
-Do the following task considering  its desription and updates:
-<task>
-${task_text}
-</task>
-
-Completion protocol:
-- For success, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${completion_column}\" --status \"${success_status}\" --comment \"<short summary>\" --attachment \"${transcript_path}\" --author \"${agent_slug}\"
-- For failure/blocker, update task yourself with:
-konby task move \"${task_abs_path}\" --column \"${completion_column}\" --status \"${failure_status}\" --comment \"<short blocker reason>\" --attachment \"${transcript_path}\" --author \"${agent_slug}\"
-- If additional input from the user is required to proceed, move the task to \"${failure_status}\" and explain what input is needed in the comment.
-- Never modify/create any files outside of the workspace/sandbox other than by means of 'konby ...' commands."
-
-tmux new-session -d -s "$session_id" -c "$workspace_dir"
-# Default to tmux mouse support for scrolling/history.
-tmux set-option -t "$session_id" mouse on
-tmux set-option -t "$session_id" set-clipboard on
-tmux bind-key -n C-\] detach-client
-tmux set-option -t "$session_id" status-right "Back to kanban board: Ctrl+]"
-if command -v pbcopy >/dev/null 2>&1 && command -v pbpaste >/dev/null 2>&1; then
-  # macOS clipboard integration: paste from system clipboard.
-  tmux bind-key p run-shell "pbpaste | tmux load-buffer - ; tmux paste-buffer"
-fi
-sleep 0.2
-
-# Checks pane tail and auto-answers known startup dialogs.
-# Returns:
-#   0 if something was handled and sent to pane
-#   1 if nothing matched
-handle_startup_dialogs() {
-  local pane="$1"
-  local cli="$2"
-  local out
-  out="$(tmux capture-pane -t "$pane" -p -S -200)"
-
-  # Codex-only update dialog.
-  if [[ "$cli" =~ codex ]]; then
-    if grep -qiE "Update available|Release notes: .*codex/releases/latest|Update now" <<<"$out"; then
-      tmux send-keys -t "$pane" -l -- "1"
-      tmux send-keys -t "$pane" C-m
-      return 0
-    fi
-  fi
-
-  # Existing trust prompts.
-  if grep -qiE "Yes, I trust this folder|Do you trust the contents" <<<"$out"; then
-    tmux send-keys -t "$pane" -l -- "1"
-    tmux send-keys -t "$pane" C-m
-    return 0
-  fi
-
-  return 1
-}
-
-# Waits until CLI is actually ready for user input.
-# Handles startup dialogs during wait.
-wait_for_cli_ready() {
-  local pane="$1"
-  local cli="$2"
-  local tries=120
-  local delay=0.5
-  local out
-
-  for ((i=1; i<=tries; i++)); do
-    handle_startup_dialogs "$pane" "$cli" && { sleep "$delay"; continue; }
-
-    out="$(tmux capture-pane -t "$pane" -p -S -200)"
-
-    if [[ "$cli" =~ codex ]]; then
-      # Codex prompt line usually starts with `› `.
-      if grep -qE '^[[:space:]]*›[[:space:]]' <<<"$out"; then
-        return 0
-      fi
-    elif [[ "$cli" =~ claude ]]; then
-      # Claude input prompt usually starts with `❯`.
-      if grep -qE '^[[:space:]]*❯' <<<"$out"; then
-        return 0
-      fi
-    else
-      # Fallback readiness signal for unknown CLIs.
-      if grep -qE '^[[:space:]]*[›❯>][[:space:]]' <<<"$out"; then
-        return 0
-      fi
-    fi
-
-    sleep "$delay"
-  done
-
-  return 1
-}
-
-# Send command literally, then explicit Enter (C-m) for better tmux compatibility.
-tmux send-keys -t "$pane_target" -l -- "$cli_cmd"
-tmux send-keys -t "$pane_target" C-m
-if ! wait_for_cli_ready "$pane_target" "$cli_cmd"; then
-  echo "Warning: timed out waiting for CLI input readiness in session ${session_id}" >&2
-fi
-
-# Use bracketed paste markers so multiline prompt is inserted as one block.
-# This prevents CLIs from submitting on embedded newlines while pasting.
-tmux send-keys -t "$pane_target" -l -- $'\e[200~'
-tmux set-buffer -- "$prompt"
-tmux paste-buffer -t "$pane_target"
-tmux send-keys -t "$pane_target" -l -- $'\e[201~'
-tmux send-keys -t "$pane_target" C-m
-
-if ! tmux has-session -t "$session_id" 2>/dev/null; then
-  err "tmux session failed to stay alive: $session_id"
-fi
-
-echo "Started tmux session: $session_id"

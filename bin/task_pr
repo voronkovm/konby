@@ -1,114 +1,110 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env node
 
-err() {
-  echo "Error: $*" >&2
-  exit 1
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { resolveBoardDir } = require('../lib/workdir');
+const { taskBranchName } = require('../lib/worktree');
+const { readScalarText } = require('../lib/session_new');
+const { githubRepoSlug } = require('../lib/task_pr');
+
+function err(msg) {
+  process.stderr.write(`Error: ${msg}\n`);
+  process.exit(1);
 }
 
-konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-workdir_js="$konby_home/lib/workdir.js"
-worktree_js="$konby_home/lib/worktree.js"
+function usage() {
+  process.stdout.write('Usage: task_pr <task-file>\n');
+}
 
-read_scalar() {
-  local key="$1"
-  local file="$2"
-  awk -v key="$key" '
-    {
-      if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
-        sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
-        gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
-        print $0
-        exit
-      }
+function git(cwd, args, opts = {}) {
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', ...opts });
+}
+
+function defaultBranch(repo) {
+  const headRef = git(repo, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  if (headRef.status === 0 && headRef.stdout.trim()) {
+    return headRef.stdout.trim().replace('refs/remotes/origin/', '');
+  }
+  for (const candidate of ['main', 'master', 'trunk']) {
+    if (git(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${candidate}`]).status === 0) {
+      return candidate;
     }
-  ' "$file"
+  }
+  return null;
 }
 
-github_repo_slug() {
-  local remote="$1"
-  local slug=""
-  if [[ "$remote" =~ ^git@github\.com:(.+)\.git$ ]]; then
-    slug="${BASH_REMATCH[1]}"
-  elif [[ "$remote" =~ ^https://github\.com/(.+)\.git$ ]]; then
-    slug="${BASH_REMATCH[1]}"
-  elif [[ "$remote" =~ ^https://github\.com/(.+)$ ]]; then
-    slug="${BASH_REMATCH[1]}"
-  fi
-  slug="${slug#/}"
-  slug="${slug%/}"
-  printf '%s\n' "$slug"
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0) { usage(); process.exit(1); }
+  if (argv[0] === '--help' || argv[0] === '-h') { usage(); process.exit(0); }
+
+  const taskFile = argv[0];
+  if (!fs.existsSync(taskFile)) err(`Task file not found: ${taskFile}`);
+
+  const taskAbs = path.resolve(taskFile);
+  const boardDir = resolveBoardDir({ startDir: process.env.PWD || process.cwd(), taskFile: taskAbs });
+
+  let workspace = readScalarText(fs.readFileSync(taskAbs, 'utf8'), 'workspace');
+  if (!workspace) {
+    workspace = boardDir;
+  } else if (!path.isAbsolute(workspace)) {
+    workspace = path.join(boardDir, workspace);
+  }
+  if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) {
+    err(`workspace does not exist: ${workspace}`);
+  }
+
+  if (git(workspace, ['rev-parse', '--is-inside-work-tree']).status !== 0) {
+    err('workspace is not a git repository');
+  }
+
+  const repoRoot = git(workspace, ['rev-parse', '--show-toplevel']).stdout.trim();
+
+  const remoteUrlResult = git(repoRoot, ['remote', 'get-url', 'origin']);
+  if (remoteUrlResult.status !== 0) err('Git remote origin is not configured');
+  const remoteUrl = remoteUrlResult.stdout.trim();
+  if (!remoteUrl.includes('github.com')) err(`origin remote is not GitHub: ${remoteUrl}`);
+
+  const repoSlug = githubRepoSlug(remoteUrl);
+  if (!repoSlug) err(`Could not parse GitHub repository from origin URL: ${remoteUrl}`);
+
+  if (spawnSync('gh', ['--version'], { encoding: 'utf8' }).status !== 0) {
+    err('gh CLI is not installed');
+  }
+
+  const defaultBranchName = defaultBranch(repoRoot);
+  if (!defaultBranchName) err('Could not determine default branch');
+
+  let currentBranch = git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+
+  if (currentBranch === defaultBranchName) {
+    const targetBranch = taskBranchName(taskAbs);
+    const branchExists = git(repoRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${targetBranch}`]).status === 0;
+    const checkoutArgs = branchExists ? ['checkout', targetBranch] : ['checkout', '-b', targetBranch];
+    const checkoutResult = git(workspace, checkoutArgs, { stdio: 'inherit' });
+    if (checkoutResult.status !== 0) process.exit(checkoutResult.status);
+    currentBranch = targetBranch;
+  }
+
+  const pushResult = spawnSync('git', ['-C', workspace, 'push', '-u', 'origin', currentBranch], { stdio: 'inherit' });
+  if (pushResult.status !== 0) process.exit(pushResult.status);
+
+  const existingPr = spawnSync('gh', ['pr', 'view', '--repo', repoSlug, currentBranch, '--json', 'url', '--jq', '.url'], { encoding: 'utf8' });
+  if (existingPr.status === 0 && existingPr.stdout.trim()) {
+    process.stdout.write(`PR already exists: ${existingPr.stdout.trim()}\n`);
+    return;
+  }
+
+  const createResult = spawnSync('gh', ['pr', 'create', '--repo', repoSlug, '--base', defaultBranchName, '--head', currentBranch, '--fill'], { stdio: 'inherit' });
+  if (createResult.status !== 0) process.exit(createResult.status);
+
+  const newPrUrl = spawnSync('gh', ['pr', 'view', '--repo', repoSlug, currentBranch, '--json', 'url', '--jq', '.url'], { encoding: 'utf8' });
+  process.stdout.write(`Created PR: ${newPrUrl.stdout.trim()}\n`);
 }
 
-default_branch() {
-  local repo="$1"
-  local head_ref
-  head_ref="$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
-  if [[ -n "$head_ref" ]]; then
-    printf '%s\n' "${head_ref#refs/remotes/origin/}"
-    return
-  fi
-  for candidate in main master trunk; do
-    if git -C "$repo" show-ref --verify --quiet "refs/heads/${candidate}"; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  err "Could not determine default branch"
+try {
+  main();
+} catch (e) {
+  err(e.message);
 }
-
-usage() {
-  cat <<'USAGE'
-Usage: task_pr <task-file>
-USAGE
-}
-
-[[ $# -ge 1 ]] || { usage; exit 1; }
-[[ "$1" != "--help" && "$1" != "-h" ]] || { usage; exit 0; }
-
-task_file="$1"
-[[ -f "$task_file" ]] || err "Task file not found: $task_file"
-
-task_abs="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
-board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --task "$task_abs")"
-workspace="$(read_scalar workspace "$task_abs")"
-if [[ -z "$workspace" ]]; then
-  workspace="$board_dir"
-elif [[ "$workspace" != /* ]]; then
-  workspace="$board_dir/$workspace"
-fi
-[[ -d "$workspace" ]] || err "workspace does not exist: $workspace"
-
-git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || err "workspace is not a git repository"
-repo_root="$(git -C "$workspace" rev-parse --show-toplevel)"
-git -C "$repo_root" remote get-url origin >/dev/null 2>&1 || err "Git remote origin is not configured"
-remote_url="$(git -C "$repo_root" remote get-url origin)"
-[[ "$remote_url" == *github.com* ]] || err "origin remote is not GitHub: $remote_url"
-repo_slug="$(github_repo_slug "$remote_url")"
-[[ -n "$repo_slug" ]] || err "Could not parse GitHub repository from origin URL: $remote_url"
-command -v gh >/dev/null 2>&1 || err "gh CLI is not installed"
-
-default="$(default_branch "$repo_root")"
-current_branch="$(git -C "$workspace" rev-parse --abbrev-ref HEAD)"
-
-if [[ "$current_branch" == "$default" ]]; then
-  target_branch="$(node "$worktree_js" task-branch --task "$task_abs")"
-  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/${target_branch}"; then
-    git -C "$workspace" checkout "$target_branch" >/dev/null
-  else
-    git -C "$workspace" checkout -b "$target_branch" >/dev/null
-  fi
-  current_branch="$target_branch"
-fi
-
-git -C "$workspace" push -u origin "$current_branch" >/dev/null
-
-existing_pr_url="$(gh pr view --repo "$repo_slug" "$current_branch" --json url --jq .url 2>/dev/null || true)"
-if [[ -n "$existing_pr_url" ]]; then
-  echo "PR already exists: $existing_pr_url"
-  exit 0
-fi
-
-gh pr create --repo "$repo_slug" --base "$default" --head "$current_branch" --fill >/dev/null
-new_pr_url="$(gh pr view --repo "$repo_slug" "$current_branch" --json url --jq .url)"
-echo "Created PR: $new_pr_url"

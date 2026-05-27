@@ -7,19 +7,8 @@ const { listTaskSessions } = require('../lib/tmux_sessions');
 const { resolveBoardDir } = require('../lib/workdir');
 const { loadYaml } = require('../lib/yaml');
 const { saveTaskYamlOrdered } = require('../lib/task_yaml');
-
-function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
-}
-
-function sanitizePathToken(value, fallback) {
-  const safe = String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return safe || fallback;
-}
+const { applyTaskMove, parseMoveArgs } = require('../lib/task_move');
+const { transcriptPathForSession } = require('../lib/transcript');
 
 function captureTmux(sessionId) {
   const out = spawnSync('tmux', ['capture-pane', '-J', '-t', sessionId, '-p', '-S', '-', '-E', '-'], {
@@ -29,22 +18,6 @@ function captureTmux(sessionId) {
   const full = String(out.stdout || '').split(/\r?\n/).join('\n').trimEnd();
   if (!full) return { ok: false, full: '', error: 'empty terminal output' };
   return { ok: true, full, error: '' };
-}
-
-function transcriptFileForSession(projectDir, taskFile, sessionId) {
-  const taskSlug = sanitizePathToken(path.basename(taskFile).replace(/\.ya?ml$/i, ''), 'task');
-  const rawSessionSlug = sanitizePathToken(sessionId || 'session', 'session');
-  const legacyTaskToken = `___${taskSlug}__`;
-  const taskToken = `__${taskSlug}__`;
-  let sessionSlug = rawSessionSlug;
-  if (rawSessionSlug.includes(taskToken)) {
-    sessionSlug = rawSessionSlug.replace(taskToken, '__');
-  } else if (rawSessionSlug.includes(legacyTaskToken)) {
-    sessionSlug = rawSessionSlug.replace(legacyTaskToken, '__');
-  }
-  const transcriptsDir = path.join(projectDir, 'transcripts', taskSlug);
-  ensureDir(transcriptsDir);
-  return path.join(transcriptsDir, `${sessionSlug}.txt`);
 }
 
 function guessProjectDir(taskFileAbs) {
@@ -60,7 +33,8 @@ function closeTaskSessionsForAssignee(projectDir, taskFile, assignee) {
   for (const session of sessions) {
     const cap = captureTmux(session.name);
     if (cap.ok) {
-      const transcriptAbsPath = transcriptFileForSession(projectDir, taskFile, session.name);
+      const transcriptAbsPath = transcriptPathForSession(projectDir, taskFile, session.name);
+      fs.mkdirSync(path.dirname(transcriptAbsPath), { recursive: true });
       const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
       const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
       if (prevTranscript === null || prevTranscript !== nextTranscript) {
@@ -79,120 +53,26 @@ function usage() {
 }
 
 function main() {
-  const argv = process.argv.slice(2);
-  if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
+  const args = parseMoveArgs(process.argv.slice(2));
+  if (args.help) {
     usage();
     return;
   }
 
-  const taskFile = argv[0];
-  let column;
-  let status;
-  let assignee;
-  let comment;
-  let attachment;
-  let author;
-
-  for (let i = 1; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (token === '--column') {
-      if (!argv[i + 1]) throw new Error('Missing value after --column');
-      column = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (token === '--stage') {
-      if (!argv[i + 1]) throw new Error('Missing value after --stage');
-      column = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (token === '--status') {
-      if (!argv[i + 1]) throw new Error('Missing value after --status');
-      status = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (token === '--assignee') {
-      if (!argv[i + 1]) throw new Error('Missing value after --assignee');
-      assignee = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (token === '--comment') {
-      if (!argv[i + 1]) throw new Error('Missing value after --comment');
-      comment = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (token === '--attachment') {
-      if (!argv[i + 1]) throw new Error('Missing value after --attachment');
-      attachment = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (token === '--author') {
-      if (!argv[i + 1]) throw new Error('Missing value after --author');
-      author = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    throw new Error(`Unknown argument: ${token}`);
-  }
-
-  if (column === undefined && status === undefined && assignee === undefined && comment === undefined && attachment === undefined) {
-    throw new Error('At least one of --column, --status, --assignee, --comment, --attachment must be provided');
-  }
-
+  const taskFile = args.taskFile;
   const fullTaskPath = path.resolve(taskFile);
   if (!fs.existsSync(fullTaskPath)) throw new Error(`Task file not found: ${fullTaskPath}`);
   const projectDir = guessProjectDir(fullTaskPath);
 
   const data = loadYaml(fullTaskPath);
-  const commentAuthor = String(author === undefined ? 'user' : author).trim();
-  if (!commentAuthor) throw new Error('--author cannot be empty');
-  const prevColumn = String(data.column || '').trim();
-  const prevStatus = String(data.status || '').trim();
-  const prevAssignee = String(data.assignee || '').trim();
-  if (column !== undefined) data.column = column;
-  if (status !== undefined) data.status = status;
-  if (assignee !== undefined) data.assignee = assignee;
-  const nextColumn = String(data.column || '').trim();
-  const nextStatus = String(data.status || '').trim();
-  const nextAssignee = String(data.assignee || '').trim();
-  const columnChanged = prevColumn !== nextColumn;
-  const statusChanged = prevStatus !== nextStatus;
-  const assigneeChanged = prevAssignee !== nextAssignee;
-  const commentText = comment === undefined ? '' : String(comment).trim();
-  const attachmentText = attachment === undefined ? '' : String(attachment).trim();
-  if (comment !== undefined && !commentText) throw new Error('--comment cannot be empty');
-  if (attachment !== undefined && !attachmentText) throw new Error('--attachment cannot be empty');
-
-  if (columnChanged || statusChanged || assigneeChanged || comment !== undefined || attachment !== undefined) {
-    const parts = [];
-    if (statusChanged) parts.push(`status: ${prevStatus || '-'} -> ${nextStatus || '-'}`);
-    if (columnChanged) parts.push(`column: ${prevColumn || '-'} -> ${nextColumn || '-'}`);
-    if (assigneeChanged) parts.push(`assignee: ${prevAssignee || '-'} -> ${nextAssignee || '-'}`);
-    if (commentText) parts.push(`comment: ${commentText}`);
-    const text = parts.join(', ');
-    if (!Array.isArray(data.updates)) data.updates = [];
-    const nextComment = {
-      author: commentAuthor,
-      text: text || 'task updated',
-      created_at: new Date().toISOString(),
-    };
-    if (attachmentText) nextComment.attachments = [attachmentText];
-    data.updates.push(nextComment);
-  }
+  const result = applyTaskMove(data, args);
   let sessionResult = null;
-  if (assignee !== undefined) {
-    const nextAssignee = String(data.assignee || '').trim();
-    if (nextAssignee !== prevAssignee) {
-      sessionResult = closeTaskSessionsForAssignee(projectDir, fullTaskPath, prevAssignee);
+  if (args.assignee !== undefined) {
+    if (result.assigneeChanged) {
+      sessionResult = closeTaskSessionsForAssignee(projectDir, fullTaskPath, result.prevAssignee);
     }
   }
-  data.updated_at = new Date().toISOString();
-  saveTaskYamlOrdered(fullTaskPath, data);
+  saveTaskYamlOrdered(fullTaskPath, result.task);
 
   process.stdout.write(`Task updated: ${fullTaskPath}\n`);
   if (sessionResult) {

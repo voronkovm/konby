@@ -1,91 +1,100 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env node
 
-err() {
-  echo "Error: $*" >&2
-  exit 1
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { resolveBoardDir } = require('../lib/workdir');
+const { readScalarText } = require('../lib/session_new');
+
+function err(msg) {
+  process.stderr.write(`Error: ${msg}\n`);
+  process.exit(1);
 }
 
-konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-workdir_js="$konby_home/lib/workdir.js"
+function usage() {
+  process.stdout.write('Usage: task_merge <task-file>\n');
+}
 
-read_scalar() {
-  local key="$1"
-  local file="$2"
-  awk -v key="$key" '
-    {
-      if ($0 ~ "^[[:space:]]*" key ":[[:space:]]*") {
-        sub("^[[:space:]]*" key ":[[:space:]]*", "", $0)
-        gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
-        print $0
-        exit
-      }
+function git(cwd, args) {
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+}
+
+function defaultBranch(repo) {
+  const headRef = git(repo, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
+  if (headRef.status === 0 && headRef.stdout.trim()) {
+    return headRef.stdout.trim().replace('refs/remotes/origin/', '');
+  }
+  for (const candidate of ['main', 'master', 'trunk']) {
+    if (git(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${candidate}`]).status === 0) {
+      return candidate;
     }
-  ' "$file"
+  }
+  return null;
 }
 
-default_branch() {
-  local repo="$1"
-  local head_ref
-  head_ref="$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)"
-  if [[ -n "$head_ref" ]]; then
-    printf '%s\n' "${head_ref#refs/remotes/origin/}"
-    return
-  fi
-  for candidate in main master trunk; do
-    if git -C "$repo" show-ref --verify --quiet "refs/heads/${candidate}"; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  err "Could not determine default branch"
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0) { usage(); process.exit(1); }
+  if (argv[0] === '--help' || argv[0] === '-h') { usage(); process.exit(0); }
+
+  const taskFile = argv[0];
+  if (!fs.existsSync(taskFile)) err(`Task file not found: ${taskFile}`);
+
+  const taskAbs = path.resolve(taskFile);
+  const boardDir = resolveBoardDir({ startDir: process.env.PWD || process.cwd(), taskFile: taskAbs });
+
+  let workspace = readScalarText(fs.readFileSync(taskAbs, 'utf8'), 'workspace');
+  if (!workspace) {
+    workspace = boardDir;
+  } else if (!path.isAbsolute(workspace)) {
+    workspace = path.join(boardDir, workspace);
+  }
+  if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) {
+    err(`workspace does not exist: ${workspace}`);
+  }
+
+  if (git(workspace, ['rev-parse', '--is-inside-work-tree']).status !== 0) {
+    err('workspace is not a git repository');
+  }
+
+  const featureBranch = git(workspace, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+  if (featureBranch === 'HEAD') err('workspace is in detached HEAD state');
+
+  const commonGitDirRaw = git(workspace, ['rev-parse', '--git-common-dir']).stdout.trim();
+  const commonGitDir = path.isAbsolute(commonGitDirRaw)
+    ? commonGitDirRaw
+    : path.resolve(workspace, commonGitDirRaw);
+  const repoRoot = path.dirname(commonGitDir);
+
+  if (!fs.existsSync(path.join(repoRoot, '.git'))) {
+    err('Could not resolve main repository from worktree');
+  }
+
+  const defaultBranchName = defaultBranch(repoRoot);
+  if (!defaultBranchName) err('Could not determine default branch');
+  if (featureBranch === defaultBranchName) {
+    err(`Current branch equals default branch (${defaultBranchName}); nothing to merge`);
+  }
+
+  const currentMainBranch = git(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+
+  try {
+    const checkoutResult = git(repoRoot, ['checkout', defaultBranchName]);
+    if (checkoutResult.status !== 0) {
+      err(`Failed to checkout ${defaultBranchName}: ${checkoutResult.stderr.trim()}`);
+    }
+
+    const mergeResult = spawnSync('git', ['-C', repoRoot, 'merge', '--no-ff', featureBranch], { stdio: 'inherit' });
+    if (mergeResult.status !== 0) process.exit(mergeResult.status);
+
+    process.stdout.write(`Merged ${featureBranch} into ${defaultBranchName} in ${repoRoot}\n`);
+  } finally {
+    git(repoRoot, ['checkout', currentMainBranch]);
+  }
 }
 
-usage() {
-  cat <<'USAGE'
-Usage: task_merge <task-file>
-USAGE
+try {
+  main();
+} catch (e) {
+  err(e.message);
 }
-
-[[ $# -ge 1 ]] || { usage; exit 1; }
-[[ "$1" != "--help" && "$1" != "-h" ]] || { usage; exit 0; }
-
-task_file="$1"
-[[ -f "$task_file" ]] || err "Task file not found: $task_file"
-
-task_abs="$(cd "$(dirname "$task_file")" && pwd)/$(basename "$task_file")"
-board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --task "$task_abs")"
-workspace="$(read_scalar workspace "$task_abs")"
-if [[ -z "$workspace" ]]; then
-  workspace="$board_dir"
-elif [[ "$workspace" != /* ]]; then
-  workspace="$board_dir/$workspace"
-fi
-[[ -d "$workspace" ]] || err "workspace does not exist: $workspace"
-
-git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || err "workspace is not a git repository"
-feature_branch="$(git -C "$workspace" rev-parse --abbrev-ref HEAD)"
-[[ "$feature_branch" != "HEAD" ]] || err "workspace is in detached HEAD state"
-
-common_git_dir_raw="$(git -C "$workspace" rev-parse --git-common-dir)"
-if [[ "$common_git_dir_raw" = /* ]]; then
-  common_git_dir="$common_git_dir_raw"
-else
-  common_git_dir="$(cd "$workspace/$common_git_dir_raw" && pwd)"
-fi
-repo_root="$(cd "$common_git_dir/.." && pwd)"
-[[ -d "$repo_root/.git" ]] || err "Could not resolve main repository from worktree"
-
-default="$(default_branch "$repo_root")"
-[[ "$feature_branch" != "$default" ]] || err "Current branch equals default branch (${default}); nothing to merge"
-
-current_main_branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)"
-cleanup() {
-  git -C "$repo_root" checkout "$current_main_branch" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-git -C "$repo_root" checkout "$default" >/dev/null
-git -C "$repo_root" merge --no-ff "$feature_branch"
-
-echo "Merged ${feature_branch} into ${default} in ${repo_root}"

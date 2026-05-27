@@ -3,524 +3,25 @@
 const fs = require('fs');
 const path = require('path');
 const { resolveBoardDir } = require('../lib/workdir');
-
-function loadDotEnv(projectDir) {
-  const envPath = path.join(projectDir, '.env');
-  if (!fs.existsSync(envPath)) return;
-  const content = fs.readFileSync(envPath, 'utf8');
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const eq = line.indexOf('=');
-    if (eq <= 0) continue;
-    const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
-      process.env[key] = value;
-    }
-  }
-}
-
-function parseArgs(argv) {
-  const out = { _: [], values: {}, set: [] };
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (token === '--') {
-      out._.push(...argv.slice(i + 1));
-      break;
-    }
-    if (!token.startsWith('--')) {
-      out._.push(token);
-      continue;
-    }
-
-    const raw = token.slice(2);
-    if (raw === 'help' || raw === 'h') {
-      out.help = true;
-      continue;
-    }
-
-    if (raw === 'set') {
-      const next = argv[i + 1];
-      if (!next || next.startsWith('--')) {
-        throw new Error('Expected KEY=VALUE after --set');
-      }
-      out.set.push(next);
-      i += 1;
-      continue;
-    }
-
-    const eq = raw.indexOf('=');
-    if (eq >= 0) {
-      const key = raw.slice(0, eq);
-      const value = raw.slice(eq + 1);
-      out.values[key] = value;
-      continue;
-    }
-
-    const key = raw;
-    const next = argv[i + 1];
-    if (!next || next.startsWith('--')) {
-      out.values[key] = 'true';
-      continue;
-    }
-
-    out.values[key] = next;
-    i += 1;
-  }
-  return out;
-}
-
-function parseScalar(value) {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  if (value === 'null') return null;
-  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
-
-  if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
-    try {
-      return JSON.parse(value);
-    } catch (_) {
-      return value;
-    }
-  }
-
-  return value;
-}
-
-function parseInlineList(text) {
-  const body = text.slice(1, -1).trim();
-  if (!body) return [];
-  return body.split(',').map((part) => parseScalar(part.trim()));
-}
-
-function parseYamlSimple(input) {
-  const root = {};
-  const stack = [{ indent: -1, kind: 'object', value: root }];
-
-  const lines = input.replace(/\t/g, '  ').split(/\r?\n/);
-
-  for (let idx = 0; idx < lines.length; idx += 1) {
-    const original = lines[idx];
-    if (!original.trim() || original.trim().startsWith('#')) continue;
-
-    const indent = original.match(/^\s*/)[0].length;
-    const line = original.trim();
-
-    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
-      stack.pop();
-    }
-
-    const parent = stack[stack.length - 1];
-
-    if (line.startsWith('- ')) {
-      if (parent.kind !== 'array') {
-        throw new Error(`Invalid YAML list item at line ${idx + 1}`);
-      }
-
-      const content = line.slice(2).trim();
-      if (!content) {
-        const node = {};
-        parent.value.push(node);
-        stack.push({ indent, kind: 'object', value: node });
-        continue;
-      }
-
-      const keyMatch = content.match(/^([^:]+):(.*)$/);
-      if (keyMatch) {
-        const key = keyMatch[1].trim();
-        const rawValue = keyMatch[2].trim();
-        const node = {};
-        node[key] = parseYamlValue(rawValue);
-        parent.value.push(node);
-        stack.push({ indent, kind: 'object', value: node });
-        continue;
-      }
-
-      parent.value.push(parseYamlValue(content));
-      continue;
-    }
-
-    if (parent.kind !== 'object') {
-      throw new Error(`Invalid YAML map entry at line ${idx + 1}`);
-    }
-
-    const match = line.match(/^([^:]+):(.*)$/);
-    if (!match) {
-      throw new Error(`Cannot parse YAML line ${idx + 1}: ${line}`);
-    }
-
-    const key = match[1].trim();
-    const rawValue = match[2].trim();
-
-    if (!rawValue) {
-      const nextLine = lines.slice(idx + 1).find((l) => l.trim() && !l.trim().startsWith('#'));
-      const nextTrim = nextLine ? nextLine.trim() : '';
-      const isArray = nextTrim.startsWith('- ');
-
-      if (isArray) {
-        const arr = [];
-        parent.value[key] = arr;
-        stack.push({ indent, kind: 'array', value: arr });
-      } else {
-        const obj = {};
-        parent.value[key] = obj;
-        stack.push({ indent, kind: 'object', value: obj });
-      }
-      continue;
-    }
-
-    parent.value[key] = parseYamlValue(rawValue);
-  }
-
-  return root;
-}
-
-function parseYamlValue(raw) {
-  if (raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1);
-  if (raw.startsWith("'") && raw.endsWith("'")) return raw.slice(1, -1);
-  if (raw.startsWith('[') && raw.endsWith(']')) return parseInlineList(raw);
-  return parseScalar(raw);
-}
-
-function formatYaml(value, indent = 0) {
-  const sp = ' '.repeat(indent);
-
-  if (Array.isArray(value)) {
-    if (value.length === 0) return `${sp}[]`;
-    return value
-      .map((item) => {
-        if (isPrimitive(item)) return `${sp}- ${yamlScalar(item)}`;
-        if (Array.isArray(item)) {
-          return `${sp}-\n${formatYaml(item, indent + 2)}`;
-        }
-        const nested = formatYaml(item, indent + 2)
-          .split('\n')
-          .map((line, i) => (i === 0 ? `${sp}- ${line.trimStart()}` : line))
-          .join('\n');
-        return nested;
-      })
-      .join('\n');
-  }
-
-  if (value && typeof value === 'object') {
-    const lines = [];
-    for (const [k, v] of Object.entries(value)) {
-      if (isPrimitive(v)) {
-        lines.push(`${sp}${k}: ${yamlScalar(v)}`);
-      } else if (Array.isArray(v)) {
-        if (v.length === 0) {
-          lines.push(`${sp}${k}: []`);
-        } else {
-          lines.push(`${sp}${k}:`);
-          lines.push(formatYaml(v, indent + 2));
-        }
-      } else {
-        lines.push(`${sp}${k}:`);
-        lines.push(formatYaml(v, indent + 2));
-      }
-    }
-    return lines.join('\n');
-  }
-
-  return `${sp}${yamlScalar(value)}`;
-}
-
-function orderObjectBySchema(obj, schema) {
-  if (!schema || !obj || typeof obj !== 'object') return obj;
-  if (Array.isArray(obj)) {
-    if (!schema.items) return obj.map((item) => orderObjectBySchema(item, null));
-    return obj.map((item) => orderObjectBySchema(item, schema.items));
-  }
-  const props = (schema && schema.properties) || {};
-  const ordered = {};
-
-  for (const key of Object.keys(props)) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      ordered[key] = orderObjectBySchema(obj[key], props[key]);
-    }
-  }
-
-  for (const key of Object.keys(obj)) {
-    if (!Object.prototype.hasOwnProperty.call(ordered, key)) {
-      ordered[key] = orderObjectBySchema(obj[key], props[key] || null);
-    }
-  }
-
-  return ordered;
-}
-
-function omitIdField(obj) {
-  const clone = { ...obj };
-  delete clone.id;
-  return clone;
-}
-
-function isPrimitive(v) {
-  return v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
-}
-
-function yamlScalar(v) {
-  if (v === null) return 'null';
-  if (typeof v === 'boolean' || typeof v === 'number') return String(v);
-  if (/^[A-Za-z0-9_./:-]+$/.test(v)) return v;
-  return JSON.stringify(v);
-}
-
-function coerceWithSchema(raw, schema) {
-  if (!schema || !schema.type) return parseScalar(raw);
-
-  if (schema.type === 'array') {
-    if (raw.startsWith('[')) {
-      const parsed = parseScalar(raw);
-      if (!Array.isArray(parsed)) {
-        throw new Error(`Expected JSON array, got: ${raw}`);
-      }
-      return parsed;
-    }
-
-    const parts = raw.split(',').map((x) => x.trim()).filter(Boolean);
-    return parts.map((part) => coerceWithSchema(part, schema.items));
-  }
-
-  if (schema.type === 'object') {
-    const parsed = parseScalar(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(`Expected JSON object for field, got: ${raw}`);
-    }
-    return parsed;
-  }
-
-  if (schema.type === 'number' || schema.type === 'integer') {
-    const num = Number(raw);
-    if (!Number.isFinite(num)) throw new Error(`Expected number, got: ${raw}`);
-    if (schema.type === 'integer' && !Number.isInteger(num)) {
-      throw new Error(`Expected integer, got: ${raw}`);
-    }
-    return num;
-  }
-
-  if (schema.type === 'boolean') {
-    if (raw === 'true') return true;
-    if (raw === 'false') return false;
-    throw new Error(`Expected boolean (true|false), got: ${raw}`);
-  }
-
-  if (schema.type === 'string') return String(raw);
-
-  return parseScalar(raw);
-}
-
-function normalizeKnownAliases(key, value, schemaProps) {
-  if (key !== 'priority' || typeof value !== 'string') return value;
-  const prop = schemaProps.priority;
-  const enums = prop && Array.isArray(prop.enum) ? prop.enum : [];
-  if (value === 'normal' && enums.includes('medium')) return 'medium';
-  return value;
-}
-
-function validate(task, schema) {
-  const errors = [];
-  validateNode(task, schema, '$', errors);
-  return errors;
-}
-
-function validateNode(value, schema, pathName, errors) {
-  if (!schema || typeof schema !== 'object') return;
-
-  if (schema.type) {
-    if (!typeMatches(value, schema.type)) {
-      errors.push(`${pathName}: expected ${schema.type}, got ${typeOf(value)}`);
-      return;
-    }
-  }
-
-  if (schema.enum && !schema.enum.includes(value)) {
-    errors.push(`${pathName}: must be one of ${schema.enum.join(', ')}`);
-  }
-
-  if (schema.type === 'object') {
-    const required = Array.isArray(schema.required) ? schema.required : [];
-    for (const key of required) {
-      if (!(key in value)) errors.push(`${pathName}.${key}: required`);
-    }
-
-    const props = schema.properties || {};
-
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(value)) {
-        if (!(key in props)) errors.push(`${pathName}.${key}: additional property is not allowed`);
-      }
-    }
-
-    for (const [key, propSchema] of Object.entries(props)) {
-      if (key in value) validateNode(value[key], propSchema, `${pathName}.${key}`, errors);
-    }
-  }
-
-  if (schema.type === 'array') {
-    if (schema.uniqueItems === true) {
-      const uniq = new Set(value.map((x) => JSON.stringify(x)));
-      if (uniq.size !== value.length) errors.push(`${pathName}: must contain unique items`);
-    }
-
-    if (schema.items) {
-      value.forEach((item, i) => validateNode(item, schema.items, `${pathName}[${i}]`, errors));
-    }
-  }
-
-  if (schema.type === 'string') {
-    if (typeof schema.minLength === 'number' && value.length < schema.minLength) {
-      errors.push(`${pathName}: minLength is ${schema.minLength}`);
-    }
-    if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) {
-      errors.push(`${pathName}: maxLength is ${schema.maxLength}`);
-    }
-    if (schema.pattern) {
-      const re = new RegExp(schema.pattern);
-      if (!re.test(value)) errors.push(`${pathName}: does not match pattern ${schema.pattern}`);
-    }
-    if (schema.format === 'date') {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) errors.push(`${pathName}: must match format date (YYYY-MM-DD)`);
-    }
-    if (schema.format === 'date-time') {
-      const d = new Date(value);
-      if (Number.isNaN(d.getTime())) errors.push(`${pathName}: must match format date-time (ISO-8601)`);
-    }
-  }
-
-  if (schema.type === 'number' || schema.type === 'integer') {
-    if (typeof schema.minimum === 'number' && value < schema.minimum) {
-      errors.push(`${pathName}: minimum is ${schema.minimum}`);
-    }
-    if (typeof schema.maximum === 'number' && value > schema.maximum) {
-      errors.push(`${pathName}: maximum is ${schema.maximum}`);
-    }
-  }
-}
-
-function typeMatches(value, expected) {
-  if (expected === 'array') return Array.isArray(value);
-  if (expected === 'object') return !!value && typeof value === 'object' && !Array.isArray(value);
-  if (expected === 'integer') return typeof value === 'number' && Number.isInteger(value);
-  return typeof value === expected;
-}
-
-function typeOf(value) {
-  if (Array.isArray(value)) return 'array';
-  if (value === null) return 'null';
-  return typeof value;
-}
-
-function buildTask(args, schema) {
-  const task = {};
-  const schemaProps = schema.properties || {};
-
-  for (const [key, raw] of Object.entries(args.values)) {
-    if (key === 'file' || key === 'schema' || key === 'dir' || key === 'force') continue;
-    const propSchema = schemaProps[key] || null;
-    const coerced = coerceWithSchema(raw, propSchema);
-    task[key] = normalizeKnownAliases(key, coerced, schemaProps);
-  }
-
-  for (const pair of args.set) {
-    const eq = pair.indexOf('=');
-    if (eq < 1) throw new Error(`Invalid --set value: ${pair}. Use KEY=VALUE`);
-    const key = pair.slice(0, eq);
-    const rawValue = pair.slice(eq + 1);
-    const propSchema = schemaProps[key] || null;
-    const coerced = coerceWithSchema(rawValue, propSchema);
-    task[key] = normalizeKnownAliases(key, coerced, schemaProps);
-  }
-
-  for (const [key, prop] of Object.entries(schemaProps)) {
-    if (!(key in task) && Object.prototype.hasOwnProperty.call(prop, 'default')) {
-      task[key] = prop.default;
-    }
-  }
-
-  if (!(Object.prototype.hasOwnProperty.call(task, 'created_at')) && schemaProps.created_at) {
-    task.created_at = new Date().toISOString();
-  }
-
-  if (
-    !(Object.prototype.hasOwnProperty.call(task, 'title')) &&
-    Array.isArray(args._) &&
-    args._.length > 0
-  ) {
-    task.title = args._.join(' ').trim();
-  }
-
-  return task;
-}
-
-function usage(schema) {
-  const keys = Object.keys(schema.properties || {});
-  return [
-    'Usage:',
-    '  task_add [--tasks <tasks_dir_rel>] [--schema <task.schema.yaml>] --title "..." [--id 10-my-task] [--status todo] [--priority medium] [--column backlog] [--board <path>]',
-    '  task_add Текст задачи без параметра title',
-    '  task_add --board ./my-board --set title="Fix bug" --set status=in_progress --set priority=critical',
-    '',
-    `Known fields from schema: ${keys.join(', ')}`,
-    'If --id is omitted, id is auto-generated from title.',
-    'File name is auto-generated as <N>-<title-slug>.yaml.',
-    'Array fields: pass JSON (["a","b"]) or comma list (a,b).',
-    'Object fields: pass JSON ({"k":"v"}).',
-  ].join('\n');
-}
-
-function sanitizeFileNamePart(text) {
-  return String(text).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-}
-
-function transliterateRuToLat(text) {
-  const translit = {
-    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
-    й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't',
-    у: 'u', ф: 'f', х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '',
-    э: 'e', ю: 'yu', я: 'ya',
-  };
-  const raw = String(text).toLowerCase();
-  let mapped = '';
-  for (const ch of raw) {
-    mapped += Object.prototype.hasOwnProperty.call(translit, ch) ? translit[ch] : ch;
-  }
-  return mapped;
-}
-
-function generateLocalSlug(text, maxWords = 5) {
-  const normalized = transliterateRuToLat(text);
-  const tokens = normalized
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, maxWords);
-  const slug = sanitizeFileNamePart(tokens.join('-'));
-  return slug || 'task';
-}
+const {
+  buildTask,
+  deriveTaskIdentityFromNumber,
+  generateLocalSlug,
+  nextTaskNumberFromFileNames,
+  normalizeTaskType,
+  parseArgs,
+  parseGeneratedTaskMeta,
+  parseYamlSimple,
+  sanitizeFileNamePart,
+  taskYamlContent,
+  usage,
+  validate,
+} = require('../lib/task_add');
+const { loadEnvFile } = require('../lib/env');
 
 function nextTaskNumber(dirPath) {
   if (!fs.existsSync(dirPath)) return 1;
-  const files = fs.readdirSync(dirPath);
-  let max = 0;
-  for (const name of files) {
-    const m = name.match(/^(\d+)-.*\.ya?ml$/i);
-    if (!m) continue;
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max + 1;
-}
-
-function normalizeTaskType(value, allowedTypes) {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (allowedTypes.includes(normalized)) return normalized;
-  return 'task';
+  return nextTaskNumberFromFileNames(fs.readdirSync(dirPath));
 }
 
 async function generateTaskMetaWithOpenAI(text, allowedTypes) {
@@ -569,41 +70,15 @@ async function generateTaskMetaWithOpenAI(text, allowedTypes) {
         ? data.choices[0].message.content
         : '';
 
-    let parsed = null;
-    try {
-      parsed = JSON.parse(content.trim());
-    } catch (_) {
-      const match = content.match(/\{[\s\S]*\}/);
-      if (match) {
-        try {
-          parsed = JSON.parse(match[0]);
-        } catch (_) {}
-      }
-    }
-
-    const slugCandidate = parsed && typeof parsed.slug === 'string' ? parsed.slug : content;
-    const cleanedSlug = sanitizeFileNamePart(slugCandidate);
-    return {
-      slug: cleanedSlug || generateLocalSlug(text, 5),
-      type: normalizeTaskType(parsed && parsed.type, allowedTypes),
-    };
+    return parseGeneratedTaskMeta(content, text, allowedTypes);
   } catch (_) {
     return { slug: generateLocalSlug(text, 5), type: 'task' };
   }
 }
 
-async function deriveTaskIdentity(dirPath, obj, precomputedSlug) {
-  const sourceText = obj.title || obj.id || 'task';
-  const titleSlug = precomputedSlug || generateLocalSlug(sourceText, 5);
-  const number = nextTaskNumber(dirPath);
-  const base = `${number}-${titleSlug || 'task'}`;
-  return { id: base, fileName: `${base}.yaml` };
-}
-
 async function writeTaskFile(dirPath, obj, force, schema) {
   if (!obj.id || typeof obj.id !== 'string' || !obj.id.trim()) {
-    const identity = await deriveTaskIdentity(dirPath, obj);
-    obj.id = identity.id;
+    obj.id = deriveTaskIdentityFromNumber(obj, nextTaskNumber(dirPath)).id;
   }
 
   fs.mkdirSync(dirPath, { recursive: true });
@@ -613,8 +88,7 @@ async function writeTaskFile(dirPath, obj, force, schema) {
     throw new Error(`Task file already exists: ${filePath}. Use --force true to overwrite.`);
   }
 
-  const ordered = orderObjectBySchema(omitIdField(obj), schema);
-  fs.writeFileSync(filePath, `${formatYaml(ordered)}\n`, 'utf8');
+  fs.writeFileSync(filePath, taskYamlContent(obj, schema), 'utf8');
   return filePath;
 }
 
@@ -625,10 +99,10 @@ async function main() {
     pathHint: args.values.board || args.values.dir,
   });
   const projectDir = boardDir;
-  loadDotEnv(projectDir);
+  loadEnvFile(path.join(projectDir, '.env'));
   const schemaPath = path.resolve(
     projectDir,
-    args.values.schema || 'task.schema.yaml'
+    args.values.schema || 'task.schema.yaml',
   );
   const targetDir = path.resolve(projectDir, args.values.tasks || args.values.file || 'tasks');
   const argsForTask = {
@@ -654,7 +128,6 @@ async function main() {
   }
 
   const schema = parseYamlSimple(fs.readFileSync(schemaPath, 'utf8'));
-
   const task = buildTask(argsForTask, schema);
   const schemaTypes =
     schema &&
@@ -674,11 +147,10 @@ async function main() {
   }
 
   if (!task.id || typeof task.id !== 'string' || !task.id.trim()) {
-    task.id = (await deriveTaskIdentity(targetDir, task, meta.slug)).id;
+    task.id = deriveTaskIdentityFromNumber(task, nextTaskNumber(targetDir), meta.slug).id;
   }
 
   const errors = validate(task, schema);
-
   if (errors.length > 0) {
     console.error('Task validation failed:');
     for (const err of errors) console.error(`- ${err}`);

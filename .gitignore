@@ -1,2 +1,4 @@
 .env
 .konby-worktrees
+node_modules/
+coverage
