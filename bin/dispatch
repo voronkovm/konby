@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
-const { listTaskSessions, sessionIdPrefix } = require('../lib/tmux_sessions');
+const { listAllKonbySessions, listTaskSessions, parseKonbySessionName, sessionIdPrefix } = require('../lib/tmux_sessions');
 const { resolveBoardDir } = require('../lib/workdir');
 const { loadYaml } = require('../lib/yaml');
 const {
@@ -334,6 +334,50 @@ async function evaluateNonNewTasks(projectDir, tasks, defaults, rules) {
   return updates;
 }
 
+function closeOrphanedSessions(projectDir, tasks) {
+  const allSessions = listAllKonbySessions();
+  if (allSessions.length === 0) return [];
+
+  const taskBySlug = new Map();
+  for (const item of tasks) {
+    const slug = path.basename(item.file).replace(/\.ya?ml$/i, '');
+    taskBySlug.set(slug, item);
+  }
+
+  const results = [];
+  for (const session of allSessions) {
+    const parsed = parseKonbySessionName(session.name);
+    if (!parsed) continue;
+
+    const item = taskBySlug.get(parsed.taskSlug);
+    if (!item) continue;
+
+    const currentAssignee = String(item.data.assignee || '').trim();
+    if (currentAssignee === parsed.agent) continue;
+
+    const cap = captureTmux(session.name, 50);
+    if (cap.ok) {
+      const transcriptAbsPath = transcriptPathForSession(projectDir, item.file, session.name);
+      fs.mkdirSync(path.dirname(transcriptAbsPath), { recursive: true });
+      const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
+      const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
+      if (prevTranscript === null || prevTranscript !== nextTranscript) {
+        fs.writeFileSync(transcriptAbsPath, nextTranscript, 'utf8');
+      }
+    }
+
+    spawnSync('tmux', ['kill-session', '-t', session.name], { encoding: 'utf8' });
+    results.push({
+      session: session.name,
+      task: path.basename(item.file),
+      agent: parsed.agent,
+      assignee: currentAssignee,
+    });
+  }
+
+  return results;
+}
+
 function acquireLock(projectDir) {
   const safe = path.resolve(projectDir).replace(/[^A-Za-z0-9_.-]/g, '_');
   const lockDir = path.join(os.tmpdir(), `code-conveyor-dispatch.lock.${safe}`);
@@ -405,6 +449,8 @@ async function main() {
       if (!data.column) data.column = 'backlog';
       return { file: full, data };
     });
+
+    const orphanedClosed = closeOrphanedSessions(projectDir, tasks);
 
     const statusDefaults = readStatusDefaults(dispatch);
     const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks, statusDefaults, rules);
@@ -488,6 +534,12 @@ async function main() {
       }
     }
 
+    if (orphanedClosed.length > 0) {
+      console.log(`Orphaned sessions closed: ${orphanedClosed.length}`);
+      for (const r of orphanedClosed) {
+        console.log(`- ${r.session}: task=${r.task}, agent=${r.agent}, current_assignee=${r.assignee}`);
+      }
+    }
     console.log(`Moved: ${moved.length}`);
     for (const file of moved) console.log(`- ${file}`);
     if (taskStatusChecks.length > 0) {

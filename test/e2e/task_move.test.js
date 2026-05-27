@@ -33,43 +33,6 @@ test('task_move uses custom author in comment', () => {
   }
 });
 
-test('task_move prints session stats when assignee changes', () => {
-  const dir = makeBoard();
-  try {
-    const taskPath = addTask(dir, 'Session stats task', ['--assignee', 'alice']);
-    const out = run('task_move', [taskPath, '--assignee', 'bob']);
-    assert.equal(out.status, 0, out.stderr);
-    assert.match(out.stdout, /Task sessions: found=\d+, closed=\d+, transcript_updated=\d+/);
-    const content = fs.readFileSync(taskPath, 'utf8');
-    assert.match(content, /assignee: bob/);
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test('task_move prints no session stats when assignee is unchanged', () => {
-  const dir = makeBoard();
-  try {
-    const taskPath = addTask(dir, 'No session stats task', ['--assignee', 'alice']);
-    const out = run('task_move', [taskPath, '--column', 'done', '--assignee', 'alice']);
-    assert.equal(out.status, 0, out.stderr);
-    assert.doesNotMatch(out.stdout, /Task sessions:/);
-  } finally {
-    cleanup(dir);
-  }
-});
-
-test('task_move prints no session stats when only column changes', () => {
-  const dir = makeBoard();
-  try {
-    const taskPath = addTask(dir, 'Column only task');
-    const out = run('task_move', [taskPath, '--column', 'review']);
-    assert.equal(out.status, 0, out.stderr);
-    assert.doesNotMatch(out.stdout, /Task sessions:/);
-  } finally {
-    cleanup(dir);
-  }
-});
 
 test('task_move prints usage and exits 0 with --help', () => {
   const out = run('task_move', ['--help']);

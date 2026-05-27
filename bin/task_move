@@ -2,51 +2,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
-const { listTaskSessions } = require('../lib/tmux_sessions');
-const { resolveBoardDir } = require('../lib/workdir');
 const { loadYaml } = require('../lib/yaml');
 const { saveTaskYamlOrdered } = require('../lib/task_yaml');
 const { applyTaskMove, parseMoveArgs } = require('../lib/task_move');
-const { transcriptPathForSession } = require('../lib/transcript');
-
-function captureTmux(sessionId) {
-  const out = spawnSync('tmux', ['capture-pane', '-J', '-t', sessionId, '-p', '-S', '-', '-E', '-'], {
-    encoding: 'utf8',
-  });
-  if (out.status !== 0) return { ok: false, full: '', error: `${out.stderr || out.stdout || 'tmux capture failed'}`.trim() };
-  const full = String(out.stdout || '').split(/\r?\n/).join('\n').trimEnd();
-  if (!full) return { ok: false, full: '', error: 'empty terminal output' };
-  return { ok: true, full, error: '' };
-}
-
-function guessProjectDir(taskFileAbs) {
-  return resolveBoardDir({ startDir: process.env.PWD || process.cwd(), taskFile: taskFileAbs });
-}
-
-function closeTaskSessionsForAssignee(projectDir, taskFile, assignee) {
-  const agent = String(assignee || '').trim();
-  if (!agent || agent === '-' || agent === '*') return { found: 0, closed: 0, transcriptUpdated: 0 };
-  const sessions = listTaskSessions(taskFile, { agent });
-  let closed = 0;
-  let transcriptUpdated = 0;
-  for (const session of sessions) {
-    const cap = captureTmux(session.name);
-    if (cap.ok) {
-      const transcriptAbsPath = transcriptPathForSession(projectDir, taskFile, session.name);
-      fs.mkdirSync(path.dirname(transcriptAbsPath), { recursive: true });
-      const nextTranscript = cap.full.endsWith('\n') ? cap.full : `${cap.full}\n`;
-      const prevTranscript = fs.existsSync(transcriptAbsPath) ? fs.readFileSync(transcriptAbsPath, 'utf8') : null;
-      if (prevTranscript === null || prevTranscript !== nextTranscript) {
-        fs.writeFileSync(transcriptAbsPath, nextTranscript, 'utf8');
-        transcriptUpdated += 1;
-      }
-    }
-    const kill = spawnSync('tmux', ['kill-session', '-t', session.name], { encoding: 'utf8' });
-    if (kill.status === 0) closed += 1;
-  }
-  return { found: sessions.length, closed, transcriptUpdated };
-}
 
 function usage() {
   process.stdout.write('Usage: task_move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>] [--author <slug>]\n');
@@ -62,24 +20,12 @@ function main() {
   const taskFile = args.taskFile;
   const fullTaskPath = path.resolve(taskFile);
   if (!fs.existsSync(fullTaskPath)) throw new Error(`Task file not found: ${fullTaskPath}`);
-  const projectDir = guessProjectDir(fullTaskPath);
 
   const data = loadYaml(fullTaskPath);
   const result = applyTaskMove(data, args);
-  let sessionResult = null;
-  if (args.assignee !== undefined) {
-    if (result.assigneeChanged) {
-      sessionResult = closeTaskSessionsForAssignee(projectDir, fullTaskPath, result.prevAssignee);
-    }
-  }
   saveTaskYamlOrdered(fullTaskPath, result.task);
 
   process.stdout.write(`Task updated: ${fullTaskPath}\n`);
-  if (sessionResult) {
-    process.stdout.write(
-      `Task sessions: found=${sessionResult.found}, closed=${sessionResult.closed}, transcript_updated=${sessionResult.transcriptUpdated}\n`,
-    );
-  }
 }
 
 try {

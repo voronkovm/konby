@@ -117,11 +117,11 @@ function waitForCliReady(pane, cli, tries = Number(process.env.KONBY_SESSION_REA
     const out = tmuxCapture(pane, 200);
     let ready = false;
     if (cli.includes('codex')) {
-      ready = /^[ \t]*›[ \t]/m.test(out);
+      ready = /^[ \t]*›[ \t]*$/m.test(out);
     } else if (cli.includes('claude')) {
-      ready = /^[ \t]*❯/m.test(out);
+      ready = /^[ \t]*❯[ \t]*$/m.test(out);
     } else {
-      ready = /^[ \t]*[›❯>][ \t]/m.test(out);
+      ready = /^[ \t]*[›❯>][ \t]*$/m.test(out);
     }
     if (ready) return true;
     sleep(delayMs);

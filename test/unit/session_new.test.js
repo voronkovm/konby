@@ -69,7 +69,7 @@ test('session identity helpers match tmux session naming invariant', () => {
   assert.equal(sessionTimestampUtc(new Date('2026-05-27T10:00:00.000Z')), '20260527T100000Z');
   assert.equal(
     sessionIdForTask('coder', '/tmp/board/tasks/12-login.yaml', '20260527T100000Z'),
-    'coder__12-login__20260527T100000Z',
+    'konby__coder__12-login__20260527T100000Z',
   );
 });
 
@@ -109,8 +109,8 @@ test('workspace and transcript path helpers are pure path calculations', () => {
     boardDir: '/tmp/board',
   }), '/repo');
 
-  const sessionId = 'coder__1-test__20260527T100000Z';
-  assert.equal(defaultTranscriptPath('tasks/1-test.yaml', sessionId), 'transcripts/1-test/coder__1-test__20260527T100000Z.txt');
+  const sessionId = 'konby__coder__1-test__20260527T100000Z';
+  assert.equal(defaultTranscriptPath('tasks/1-test.yaml', sessionId), 'transcripts/1-test/konby__coder__1-test__20260527T100000Z.txt');
   assert.equal(transcriptAbsPath('/tmp/board', 'transcripts/1.txt'), '/tmp/board/transcripts/1.txt');
   assert.equal(transcriptPathRelativeToWorkspace('/tmp/board/transcripts/1.txt', '/tmp/board/workspace'), '../transcripts/1.txt');
 });
@@ -219,7 +219,7 @@ test('runCli exposes shell-consumable helper commands', () => {
   try {
     runCli(['agent-slug', '--agent', 'agents/coder.yaml']);
     runCli(['session-id', '--agentSlug', 'coder', '--task', 'tasks/1-test.yaml', '--sessionTs', '20260527T100000Z']);
-    runCli(['default-transcript', '--task', 'tasks/1-test.yaml', '--sessionId', 'coder__1-test__20260527T100000Z']);
+    runCli(['default-transcript', '--task', 'tasks/1-test.yaml', '--sessionId', 'konby__coder__1-test__20260527T100000Z']);
     runCli(['yaml-escape', '--value', '/tmp/work space']);
   } finally {
     process.stdout.write = originalWrite;
@@ -227,8 +227,8 @@ test('runCli exposes shell-consumable helper commands', () => {
 
   assert.deepEqual(writes, [
     'coder\n',
-    'coder__1-test__20260527T100000Z\n',
-    'transcripts/1-test/coder__1-test__20260527T100000Z.txt\n',
+    'konby__coder__1-test__20260527T100000Z\n',
+    'transcripts/1-test/konby__coder__1-test__20260527T100000Z.txt\n',
     '"/tmp/work space"\n',
   ]);
 });
