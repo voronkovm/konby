@@ -326,6 +326,11 @@ function renderBoard(stateRef) {
     lines.push('Add task popup (Enter save, Esc cancel):');
     lines.push(`title: ${stateRef.addBuffer}`);
   }
+  if (stateRef.mode === 'confirm_merge') {
+    const task = selectedTask(stateRef);
+    lines.push('');
+    lines.push(`Confirm merge for ${task ? task.file : 'selected task'}? (y/Enter = yes, n/Esc = no)`);
+  }
 
   return lines.join('\n');
 }
@@ -362,6 +367,11 @@ function renderTaskDetails(stateRef) {
     lines.push('');
     lines.push('Add comment (Enter save, Esc cancel):');
     lines.push(`text: ${stateRef.commentBuffer}`);
+  }
+  if (stateRef.mode === 'confirm_merge') {
+    const task = selectedTask(stateRef);
+    lines.push('');
+    lines.push(`Confirm merge for ${task ? task.file : 'selected task'}? (y/Enter = yes, n/Esc = no)`);
   }
 
   return lines.join('\n');
@@ -842,6 +852,27 @@ function runTaskAction(stateRef, scriptName, successMsg) {
   }
 }
 
+function startConfirmMerge(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  stateRef.mode = 'confirm_merge';
+}
+
+function handleConfirmMergeInput(stateRef, key) {
+  if (key === '\u001b' || key === 'n' || key === 'N') {
+    stateRef.mode = 'normal';
+    setMessage(stateRef, 'Merge canceled');
+    return;
+  }
+  if (key === '\r' || key === 'y' || key === 'Y') {
+    stateRef.mode = 'normal';
+    runTaskAction(stateRef, 'task_merge', 'Merge executed');
+  }
+}
+
 function main() {
   const argv = process.argv.slice(2);
   let boardPathHint;
@@ -964,6 +995,12 @@ function main() {
       return;
     }
 
+    if (stateRef.mode === 'confirm_merge') {
+      handleConfirmMergeInput(stateRef, key);
+      redraw(stateRef);
+      return;
+    }
+
     if (stateRef.mode === 'details') {
       if (key === '\u001b') {
         stateRef.mode = 'normal';
@@ -994,7 +1031,7 @@ function main() {
       } else if (key === 'p') {
         runTaskAction(stateRef, 'task_pr', 'PR flow executed');
       } else if (key === 'g') {
-        runTaskAction(stateRef, 'task_merge', 'Merge executed');
+        startConfirmMerge(stateRef);
       } else if (key === 'd') {
         runDispatchOnce(stateRef);
       }
@@ -1025,7 +1062,7 @@ function main() {
     } else if (key === 'p') {
       runTaskAction(stateRef, 'task_pr', 'PR flow executed');
     } else if (key === 'g') {
-      runTaskAction(stateRef, 'task_merge', 'Merge executed');
+      startConfirmMerge(stateRef);
     } else if (key === 'd') {
       runDispatchOnce(stateRef);
     } else if (key === '\r') {

@@ -7,7 +7,7 @@ board:
     - name: development
       wip_limit: 3
     - name: review
-      wip_limit: 3
+      wip_limit: 2
     - name: done
       wip_limit: -
 
@@ -48,6 +48,7 @@ rules:
       status: done
     then:
       column: review
+      status: todo
       assignee: "-"
 
   - when:

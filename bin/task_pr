@@ -8,6 +8,7 @@ err() {
 
 konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workdir_js="$konby_home/lib/workdir.js"
+worktree_js="$konby_home/lib/worktree.js"
 
 read_scalar() {
   local key="$1"
@@ -22,13 +23,6 @@ read_scalar() {
       }
     }
   ' "$file"
-}
-
-sanitize_branch() {
-  local raw="$1"
-  printf '%s' "$raw" \
-    | tr '[:upper:]' '[:lower:]' \
-    | sed -E 's/[^a-z0-9._\/-]+/-/g; s#/{2,}#/#g; s#^/+##; s#/*$##; s/-+/-/g'
 }
 
 github_repo_slug() {
@@ -96,15 +90,9 @@ command -v gh >/dev/null 2>&1 || err "gh CLI is not installed"
 
 default="$(default_branch "$repo_root")"
 current_branch="$(git -C "$workspace" rev-parse --abbrev-ref HEAD)"
-task_id="$(read_scalar id "$task_abs")"
-if [[ -z "$task_id" ]]; then
-  task_id="$(basename "$task_abs" .yml)"
-  task_id="${task_id%.yaml}"
-fi
 
 if [[ "$current_branch" == "$default" ]]; then
-  target_branch="$(sanitize_branch "konby/${task_id}")"
-  [[ -n "$target_branch" ]] || target_branch="konby/task"
+  target_branch="$(node "$worktree_js" task-branch --task "$task_abs")"
   if git -C "$repo_root" show-ref --verify --quiet "refs/heads/${target_branch}"; then
     git -C "$workspace" checkout "$target_branch" >/dev/null
   else

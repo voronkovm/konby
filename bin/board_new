@@ -72,11 +72,42 @@ set_workspace_default() {
   tmp_file="$(mktemp)"
 
   awk -v ws="$workspace_path" '
-    BEGIN { in_ws = 0 }
-    /^[[:space:]]*workspace:/ { in_ws = 1; print; next }
-    in_ws && /^[^[:space:]]/ { in_ws = 0 }
-    in_ws && /^[[:space:]]*default:/ { print "    default: \"" ws "\""; next }
+    BEGIN { in_ws = 0; ws_indent = -1; wrote_default = 0 }
+    /^[[:space:]]*workspace:[[:space:]]*$/ {
+      match($0, /^[[:space:]]*/)
+      ws_indent = RLENGTH
+      in_ws = 1
+      print
+      next
+    }
+    in_ws && $0 !~ /^[[:space:]]*$/ {
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH <= ws_indent) {
+        if (!wrote_default) {
+          print "    default: \"" ws "\""
+          wrote_default = 1
+        }
+        in_ws = 0
+      }
+    }
+    in_ws && /^[^[:space:]]/ {
+      if (!wrote_default) {
+        print "    default: \"" ws "\""
+        wrote_default = 1
+      }
+      in_ws = 0
+    }
+    in_ws && /^[[:space:]]*default:/ {
+      print "    default: \"" ws "\""
+      wrote_default = 1
+      next
+    }
     { print }
+    END {
+      if (in_ws && !wrote_default) {
+        print "    default: \"" ws "\""
+      }
+    }
   ' "$schema_file" > "$tmp_file"
 
   mv "$tmp_file" "$schema_file"
@@ -128,6 +159,12 @@ main() {
   mkdir -p "$target_dir/tasks" "$target_dir/transcripts"
   echo "Ensured dirs: tasks/ transcripts/"
   if [[ -n "$workspace_path" ]]; then
+    if [[ "$workspace_path" != /* ]]; then
+      workspace_path="$(pwd)/$workspace_path"
+    fi
+    if [[ -d "$workspace_path" ]]; then
+      workspace_path="$(cd "$workspace_path" && pwd -P)"
+    fi
     set_workspace_default "$target_dir/task.schema.yaml" "$workspace_path"
   fi
 

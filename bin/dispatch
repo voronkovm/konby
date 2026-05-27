@@ -268,6 +268,11 @@ function runAgent(projectDir, agent, taskPath, statusCfg, transcriptPath, sessio
   return out;
 }
 
+function tmuxSessionExists(sessionId) {
+  const out = spawnSync('tmux', ['has-session', '-t', sessionId], { encoding: 'utf8' });
+  return out.status === 0;
+}
+
 function runTaskMove(projectDir, taskPath, updates) {
   const cmd = path.join(__dirname, 'task_move');
   const args = [taskPath];
@@ -799,6 +804,14 @@ async function main() {
             output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
           });
           if (result.status !== 0) continue;
+          if (!tmuxSessionExists(sessionId)) {
+            launched[launched.length - 1].ok = false;
+            launched[launched.length - 1].output = [
+              launched[launched.length - 1].output,
+              `tmux session not running after launch: ${sessionId}`,
+            ].filter(Boolean).join('\n');
+            continue;
+          }
         }
 
         const moveResult = runTaskMove(projectDir, item.file, {

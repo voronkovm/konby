@@ -22,10 +22,11 @@ err() {
 
 konby_home="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workdir_js="$konby_home/lib/workdir.js"
+worktree_js="$konby_home/lib/worktree.js"
 
 agent_input=""
 task_file=""
-board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)")"
+board_dir=""
 status_todo_arg=""
 status_in_progress_arg=""
 status_success_arg=""
@@ -98,7 +99,11 @@ done
 
 [[ -n "$agent_input" ]] || err "--agent is required"
 [[ -n "$task_file" ]] || err "--task is required"
-board_dir="$(node "$workdir_js" resolve-board --start "$(pwd)" --path "$board_dir" --task "$task_file")"
+resolve_board_args=(resolve-board --start "$(pwd)" --task "$task_file")
+if [[ -n "$board_dir" ]]; then
+  resolve_board_args+=(--path "$board_dir")
+fi
+board_dir="$(node "$workdir_js" "${resolve_board_args[@]}")"
 board_parent_dir="$(cd "$board_dir/.." && pwd)"
 cd "$board_dir"
 
@@ -181,6 +186,33 @@ read_scalar() {
         print $0
         exit
       }
+    }
+  ' "$file"
+}
+
+read_schema_property_default() {
+  local property="$1"
+  local file="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v property="$property" '
+    BEGIN { in_prop = 0; prop_indent = -1 }
+    $0 ~ "^[[:space:]]*" property ":[[:space:]]*$" {
+      match($0, /^[[:space:]]*/)
+      prop_indent = RLENGTH
+      in_prop = 1
+      next
+    }
+    in_prop && $0 !~ /^[[:space:]]*$/ {
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH <= prop_indent) {
+        in_prop = 0
+      }
+    }
+    in_prop && /^[[:space:]]*default:[[:space:]]*/ {
+      sub(/^[[:space:]]*default:[[:space:]]*/, "", $0)
+      gsub(/^["'\'' ]+|["'\'' ]+$/, "", $0)
+      print $0
+      exit
     }
   ' "$file"
 }
@@ -268,6 +300,9 @@ if [[ -z "$workspace_type" ]]; then
   workspace_type="local"
 fi
 if [[ -z "$workspace_dir" ]]; then
+  workspace_dir="$(read_schema_property_default workspace "$board_dir/task.schema.yaml")"
+fi
+if [[ -z "$workspace_dir" ]]; then
   workspace_dir="$board_dir"
 elif [[ "$workspace_dir" != /* ]]; then
   workspace_dir="$board_dir/$workspace_dir"
@@ -286,12 +321,8 @@ if [[ "$workspace_type" == "worktree" ]]; then
   fi
 
   if [[ "${is_worktree_dir:-0}" -eq 0 ]]; then
-    task_branch="konby/${task_slug}"
-    task_branch="$(printf '%s' "$task_branch" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._\/-]+/-/g; s#/{2,}#/#g; s#^/+##; s#/*$##')"
-    if [[ -z "$task_branch" ]]; then
-      task_branch="konby/task"
-    fi
-    task_worktree_dir="${repo_root}/.konby-worktrees/${task_branch//\//__}"
+    task_branch="$(node "$worktree_js" task-branch --task "$task_file")"
+    task_worktree_dir="$(node "$worktree_js" task-worktree-dir --repo "$repo_root" --task "$task_file")"
     mkdir -p "$(dirname "$task_worktree_dir")"
     if [[ ! -d "$task_worktree_dir" ]]; then
       if git -C "$repo_root" show-ref --verify --quiet "refs/heads/${task_branch}"; then
@@ -447,5 +478,9 @@ tmux set-buffer -- "$prompt"
 tmux paste-buffer -t "$pane_target"
 tmux send-keys -t "$pane_target" -l -- $'\e[201~'
 tmux send-keys -t "$pane_target" C-m
+
+if ! tmux has-session -t "$session_id" 2>/dev/null; then
+  err "tmux session failed to stay alive: $session_id"
+fi
 
 echo "Started tmux session: $session_id"
