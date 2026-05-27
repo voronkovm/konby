@@ -42,6 +42,33 @@ function tmuxCapture(pane, lines = 200) {
   return out.status === 0 ? String(out.stdout || '') : '';
 }
 
+function git(cwd, args, opts = {}) {
+  return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', ...opts });
+}
+
+function hasGitChanges(repoRoot) {
+  const status = git(repoRoot, ['status', '--porcelain']);
+  if (status.status !== 0) err(`Failed to read git status: ${status.stderr.trim()}`);
+  return status.stdout.trim().length > 0;
+}
+
+function commitPendingRepoChanges(repoRoot, taskAbsPath) {
+  if (!hasGitChanges(repoRoot)) return false;
+
+  const addResult = git(repoRoot, ['add', '--all']);
+  if (addResult.status !== 0) err(`Failed to stage repository changes: ${addResult.stderr.trim()}`);
+  if (!hasGitChanges(repoRoot)) return false;
+
+  const taskName = path.basename(taskAbsPath, path.extname(taskAbsPath));
+  const commitResult = git(
+    repoRoot,
+    ['commit', '-m', `konby worktree base: ${taskName}`],
+    { stdio: 'inherit' },
+  );
+  if (commitResult.status !== 0) process.exit(commitResult.status);
+  return true;
+}
+
 function resolveAgentFile(input, boardDir) {
   if (!input.includes('/') && !input.endsWith('.yml') && !input.endsWith('.yaml')) return null;
   const base = path.isAbsolute(input) ? input : path.join(boardDir, input);
@@ -185,6 +212,7 @@ function main() {
       const plan = worktreePlan(repoRoot, taskAbsPath);
       fs.mkdirSync(path.dirname(plan.dir), { recursive: true });
       if (!fs.existsSync(plan.dir)) {
+        commitPendingRepoChanges(repoRoot, taskAbsPath);
         const branchExists = spawnSync('git', ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { encoding: 'utf8' }).status === 0;
         const wtArgs = branchExists
           ? ['worktree', 'add', '-f', plan.dir, plan.branch]

@@ -34,13 +34,15 @@ function cleanup(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-function makeFakeCodexDir() {
+function makeFakeCodexDir(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-fake-codex-'));
   const script = path.join(dir, 'codex');
+  const defaultOutcome = opts.outcome || 'success';
   fs.writeFileSync(script, `#!/usr/bin/env node
 'use strict';
 
 const { execSync } = require('child_process');
+const defaultOutcome = ${JSON.stringify(defaultOutcome)};
 
 process.stdout.write('fake codex ready\\n› ');
 process.stdin.setEncoding('utf8');
@@ -50,6 +52,10 @@ process.stdin.on('data', (chunk) => {
   buffer += chunk;
   if (buffer.includes('\\x1b[200~') && !buffer.includes('\\x1b[201~')) return;
   if (!buffer.includes('\\n')) return;
+  const outcome = String(process.env.FAKE_CODEX_OUTCOME || defaultOutcome).toLowerCase();
+  const needsSecond = outcome === 'blocked' || outcome === 'failure';
+  const partialCmds = buffer.match(/konby task move [^\\r\\n]+/g) || [];
+  if (needsSecond && partialCmds.length < 2 && !buffer.includes('\\x1b[201~')) return;
   const raw = buffer;
   buffer = '';
   const commands = raw.match(/konby task move [^\\r\\n]+/g) || [];
@@ -57,8 +63,7 @@ process.stdin.on('data', (chunk) => {
     process.stdout.write('\\n› ');
     return;
   }
-  const outcome = String(process.env.FAKE_CODEX_OUTCOME || 'success').toLowerCase();
-  const command = outcome === 'blocked' || outcome === 'failure'
+  const command = needsSecond
     ? (commands[1] || commands[0])
     : commands[0];
   try {

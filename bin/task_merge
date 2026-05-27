@@ -19,6 +19,29 @@ function git(cwd, args) {
   return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
 }
 
+function hasWorktreeChanges(workspace) {
+  const status = git(workspace, ['status', '--porcelain']);
+  if (status.status !== 0) err(`Failed to read git status: ${status.stderr.trim()}`);
+  return status.stdout.trim().length > 0;
+}
+
+function commitWorkspaceChanges(workspace, taskAbs) {
+  if (!hasWorktreeChanges(workspace)) return false;
+
+  const addResult = git(workspace, ['add', '--all']);
+  if (addResult.status !== 0) err(`Failed to stage workspace changes: ${addResult.stderr.trim()}`);
+  if (!hasWorktreeChanges(workspace)) return false;
+
+  const taskName = path.basename(taskAbs, path.extname(taskAbs));
+  const commitResult = spawnSync(
+    'git',
+    ['-C', workspace, 'commit', '-m', `konby task merge: ${taskName}`],
+    { stdio: 'inherit' },
+  );
+  if (commitResult.status !== 0) process.exit(commitResult.status);
+  return true;
+}
+
 function defaultBranch(repo) {
   const headRef = git(repo, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']);
   if (headRef.status === 0 && headRef.stdout.trim()) {
@@ -79,6 +102,8 @@ function main() {
   const currentMainBranch = git(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
 
   try {
+    const committedWorkspaceChanges = commitWorkspaceChanges(workspace, taskAbs);
+
     const checkoutResult = git(repoRoot, ['checkout', defaultBranchName]);
     if (checkoutResult.status !== 0) {
       err(`Failed to checkout ${defaultBranchName}: ${checkoutResult.stderr.trim()}`);
@@ -88,6 +113,9 @@ function main() {
     if (mergeResult.status !== 0) process.exit(mergeResult.status);
 
     process.stdout.write(`Merged ${featureBranch} into ${defaultBranchName} in ${repoRoot}\n`);
+    if (committedWorkspaceChanges) {
+      process.stdout.write(`Committed pending workspace changes on ${featureBranch} before merge\n`);
+    }
   } finally {
     git(repoRoot, ['checkout', currentMainBranch]);
   }

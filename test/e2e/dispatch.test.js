@@ -12,6 +12,8 @@ const { loadYaml } = require('../../lib/yaml');
 const { listTaskSessions, sessionIdPrefix } = require('../../lib/tmux_sessions');
 const { transcriptPathForSession } = require('../../lib/transcript');
 
+const os = require('os');
+
 const hasTmux = spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status === 0;
 const missingDep = !hasTmux ? 'tmux not installed' : false;
 
@@ -23,7 +25,7 @@ function readTask(taskFile) {
   return loadYaml(taskFile);
 }
 
-function waitForTask(taskFile, predicate, tries = 50, delayMs = 200) {
+function waitForTask(taskFile, predicate, tries = 100, delayMs = 200) {
   for (let i = 0; i < tries; i++) {
     const task = readTask(taskFile);
     if (predicate(task)) return task;
@@ -161,7 +163,7 @@ test('dispatch moves a task through columns according to dispatch rules', { skip
 });
 
 test('dispatch-launched agent can move a task to blocked', { skip: missingDep, timeout: 60000 }, () => {
-  const fakeCodexDir = makeFakeCodexDir();
+  const fakeCodexDir = makeFakeCodexDir({ outcome: 'blocked' });
   const boardDir = makeDispatchBoard(fakeCodexDir);
   let taskFile = null;
   try {
@@ -171,10 +173,18 @@ test('dispatch-launched agent can move a task to blocked', { skip: missingDep, t
       '--assignee', '-',
     ]);
 
-    const out = runDispatch(boardDir, fakeCodexDir, { FAKE_CODEX_OUTCOME: 'blocked' });
+    const out = runDispatch(boardDir, fakeCodexDir);
     assert.equal(out.status, 0, out.stderr);
     assert.match(out.stdout, /Launched: 1/);
-    const task = waitForTask(taskFile, (t) => t.column === 'refinement' && t.assignee === 'bsa' && t.status === 'blocked');
+
+    const sessions = listTaskSessions(taskFile, { agent: 'bsa' });
+    assert.ok(sessions.length > 0, 'expected a bsa session to be launched by dispatch');
+    const sessionId = sessions[0].name;
+
+    const terminalOut = waitForTmuxOutput(sessionId, /fake codex completed/, 60, 500);
+    assert.match(terminalOut, /fake codex completed/, 'fake codex did not complete within timeout');
+
+    const task = readTask(taskFile);
     assert.equal(task.column, 'refinement');
     assert.equal(task.status, 'blocked');
     assert.equal(task.assignee, 'bsa');
@@ -305,5 +315,74 @@ test('dispatch skips moves when destination WIP limit is reached', { timeout: 30
   } finally {
     cleanup(boardDir);
     cleanup(fakeCodexDir);
+  }
+});
+
+test('dispatch prints usage and exits 0 with --help', () => {
+  const out = spawnSync(path.join(BIN, 'dispatch'), ['--help'], {
+    encoding: 'utf8',
+    env: { ...process.env, OPENAI_API_KEY: '' },
+  });
+  assert.equal(out.status, 0);
+  assert.match(out.stdout, /Usage: dispatch/);
+});
+
+test('dispatch skips when another instance is already running', () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  try {
+    const safe = path.resolve(boardDir).replace(/[^A-Za-z0-9_.-]/g, '_');
+    const lockDir = path.join(os.tmpdir(), `code-conveyor-dispatch.lock.${safe}`);
+    const ownerFile = path.join(lockDir, 'owner.json');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+    try {
+      const out = run('dispatch', ['--board', boardDir]);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /Skipped: bin\/dispatch is already running/);
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  } finally {
+    cleanup(boardDir);
+  }
+});
+
+test('dispatch clears stale lock from a dead process and runs', () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  try {
+    const safe = path.resolve(boardDir).replace(/[^A-Za-z0-9_.-]/g, '_');
+    const lockDir = path.join(os.tmpdir(), `code-conveyor-dispatch.lock.${safe}`);
+    const ownerFile = path.join(lockDir, 'owner.json');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(ownerFile, JSON.stringify({ pid: 2147483647, started_at: new Date().toISOString() }));
+    try {
+      const out = run('dispatch', ['--board', boardDir]);
+      assert.equal(out.status, 0, `stderr: ${out.stderr}`);
+      assert.match(out.stdout, /Moved: 0/);
+    } finally {
+      if (fs.existsSync(lockDir)) fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  } finally {
+    cleanup(boardDir);
+  }
+});
+
+test('dispatch clears lock with malformed owner file and runs', () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  try {
+    const safe = path.resolve(boardDir).replace(/[^A-Za-z0-9_.-]/g, '_');
+    const lockDir = path.join(os.tmpdir(), `code-conveyor-dispatch.lock.${safe}`);
+    const ownerFile = path.join(lockDir, 'owner.json');
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(ownerFile, 'not valid json{{');
+    try {
+      const out = run('dispatch', ['--board', boardDir]);
+      assert.equal(out.status, 0, `stderr: ${out.stderr}`);
+      assert.match(out.stdout, /Moved: 0/);
+    } finally {
+      if (fs.existsSync(lockDir)) fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  } finally {
+    cleanup(boardDir);
   }
 });

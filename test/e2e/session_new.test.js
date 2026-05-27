@@ -7,14 +7,13 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const { run, makeBoard, addTask, cleanup, BIN } = require('../integration/fixtures');
+const { run, makeBoard, addTask, cleanup, makeFakeCodexDir, setAgentCli, BIN } = require('../integration/fixtures');
 const { sessionIdForTask, agentSlugFromFile } = require('../../lib/session_new');
 
 // --- precondition guard ---
 
 const hasTmux = spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status === 0;
-const hasCodex = spawnSync('codex', ['--version'], { encoding: 'utf8' }).status === 0;
-const missingDep = !hasTmux ? 'tmux not installed' : !hasCodex ? 'codex not installed' : false;
+const missingDep = !hasTmux ? 'tmux not installed' : false;
 
 // --- helpers ---
 
@@ -35,6 +34,7 @@ function makeGitRepo(dir) {
 function runSessionNew(args) {
   return spawnSync(path.join(BIN, 'session_new'), args, {
     encoding: 'utf8',
+    env: { ...process.env, KONBY_SESSION_READY_TRIES: '2' },
     timeout: 90000,
   });
 }
@@ -72,8 +72,10 @@ function waitForTmuxContent(id, re, tries = 20, delayMs = 500) {
 
 // --- tests ---
 
-test('session_new starts a tmux session with codex', { skip: missingDep, timeout: 120000 }, () => {
+test('session_new starts a tmux session with configured CLI', { skip: missingDep, timeout: 120000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
   const boardDir = makeBoard({ preset: 'swe' });
+  setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
   let taskFile = null;
   let sessionId = null;
@@ -94,19 +96,22 @@ test('session_new starts a tmux session with codex', { skip: missingDep, timeout
     assert.ok(sessionId, 'should extract session ID from stdout');
     assert.ok(tmuxHasSession(sessionId), `tmux session should exist: ${sessionId}`);
     assert.ok(
-      waitForTmuxContent(sessionId, /codex|›/i),
-      'codex output should appear in pane',
+      waitForTmuxContent(sessionId, /fake codex ready|›/i),
+      'configured CLI output should appear in pane',
     );
   } finally {
     if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
     else tmuxKillIfExists(sessionId);
     cleanup(boardDir);
+    cleanup(fakeCodexDir);
     cleanup(workspaceDir);
   }
 });
 
 test('session_new creates git worktree and starts session', { skip: missingDep, timeout: 120000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
   const boardDir = makeBoard({ preset: 'swe' });
+  setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
   let taskFile = null;
   let sessionId = null;
@@ -140,12 +145,62 @@ test('session_new creates git worktree and starts session', { skip: missingDep, 
     if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
     else tmuxKillIfExists(sessionId);
     cleanup(boardDir);
+    cleanup(fakeCodexDir);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test('session_new commits dirty repo state before creating worktree branch', { skip: missingDep, timeout: 120000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
+  const boardDir = path.join(repoDir, 'tasks');
+  let taskFile = null;
+  let sessionId = null;
+  try {
+    makeGitRepo(repoDir);
+    const boardOut = run('board_new', [boardDir, '--preset', 'swe', '--workspace', repoDir]);
+    assert.equal(boardOut.status, 0, `board_new failed:\n${boardOut.stderr}`);
+    setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
+    spawnSync('git', ['-C', repoDir, 'add', '.'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', repoDir, 'commit', '-m', 'add board'], { encoding: 'utf8' });
+
+    taskFile = addTask(boardDir, 'worktree base commit task', [
+      '--workspace', repoDir,
+      '--assignee', 'coder',
+    ]);
+    const transcriptRel = path.join('transcripts', '1-worktree-base-commit-task', 'coder__base.txt');
+    const transcriptAbs = path.join(boardDir, transcriptRel);
+    fs.mkdirSync(path.dirname(transcriptAbs), { recursive: true });
+    fs.writeFileSync(transcriptAbs, 'base transcript\n');
+
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+    ]);
+    assert.equal(out.status, 0, `session_new failed:\n${out.stderr}`);
+    sessionId = extractSessionId(out.stdout);
+
+    const branch = 'tasks/1-worktree-base-commit-task';
+    const transcriptPathInRepo = path.relative(repoDir, transcriptAbs);
+    const showBase = spawnSync('git', ['-C', repoDir, 'show', `HEAD:${transcriptPathInRepo}`], { encoding: 'utf8' });
+    assert.equal(showBase.stdout, 'base transcript\n');
+    const mergeBase = spawnSync('git', ['-C', repoDir, 'merge-base', 'HEAD', branch], { encoding: 'utf8' });
+    assert.equal(mergeBase.status, 0, mergeBase.stderr);
+    const showBranchBase = spawnSync('git', ['-C', repoDir, 'show', `${mergeBase.stdout.trim()}:${transcriptPathInRepo}`], { encoding: 'utf8' });
+    assert.equal(showBranchBase.stdout, 'base transcript\n');
+  } finally {
+    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
+    else tmuxKillIfExists(sessionId);
+    cleanup(fakeCodexDir);
     fs.rmSync(repoDir, { recursive: true, force: true });
   }
 });
 
 test('session_new fails when tmux session already exists', { skip: missingDep, timeout: 180000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
   const boardDir = makeBoard({ preset: 'swe' });
+  setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
   const sessionTs = '20250101T000000Z';
   let taskFile = null;
@@ -176,6 +231,7 @@ test('session_new fails when tmux session already exists', { skip: missingDep, t
   } finally {
     if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
     cleanup(boardDir);
+    cleanup(fakeCodexDir);
     cleanup(workspaceDir);
   }
 });

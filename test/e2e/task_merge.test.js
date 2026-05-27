@@ -103,6 +103,42 @@ test('task_merge works with a git worktree as workspace', () => {
   }
 });
 
+test('task_merge commits pending worktree changes before merging', () => {
+  const boardDir = makeBoard({ preset: 'swe' });
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
+  const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-wt-'));
+  fs.rmSync(worktreeDir, { recursive: true, force: true }); // git worktree add requires non-existing path
+  try {
+    makeGitRepo(repoDir);
+    git(repoDir, ['checkout', '-b', 'feature/task-3']);
+    git(repoDir, ['checkout', defaultBranchName(repoDir)]);
+    const addWt = git(repoDir, ['worktree', 'add', worktreeDir, 'feature/task-3']);
+    assert.equal(addWt.status, 0, `worktree add failed: ${addWt.stderr}`);
+
+    fs.mkdirSync(path.join(worktreeDir, 'tests'));
+    fs.writeFileSync(path.join(worktreeDir, 'hello_world.py'), 'print("hello world")\n');
+    fs.writeFileSync(path.join(worktreeDir, 'tests', 'test_hello_world.py'), 'def test_hello_world():\n    assert True\n');
+
+    const taskFile = addTask(boardDir, 'Pending worktree merge task', ['--workspace', worktreeDir]);
+    const out = runTaskMerge([taskFile]);
+
+    assert.equal(out.status, 0, `task_merge failed:\nstdout: ${out.stdout}\nstderr: ${out.stderr}`);
+    assert.match(out.stdout, /Committed pending workspace changes on feature\/task-3 before merge/);
+
+    const defBranch = defaultBranchName(repoDir);
+    assert.equal(git(repoDir, ['show', `${defBranch}:hello_world.py`]).stdout, 'print("hello world")\n');
+    assert.equal(
+      git(repoDir, ['show', `${defBranch}:tests/test_hello_world.py`]).stdout,
+      'def test_hello_world():\n    assert True\n',
+    );
+  } finally {
+    cleanup(boardDir);
+    git(repoDir, ['worktree', 'prune']);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    if (fs.existsSync(worktreeDir)) fs.rmSync(worktreeDir, { recursive: true, force: true });
+  }
+});
+
 test('task_merge fails when task file does not exist', () => {
   const out = runTaskMerge(['/tmp/konby-no-such-task.yaml']);
   assert.notEqual(out.status, 0);
