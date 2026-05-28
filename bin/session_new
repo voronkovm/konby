@@ -42,6 +42,31 @@ function tmuxCapture(pane, lines = 200) {
   return out.status === 0 ? String(out.stdout || '') : '';
 }
 
+function tmuxSendLiteral(pane, text) {
+  return spawnSync('tmux', ['send-keys', '-t', pane, '-l', '--', text], { encoding: 'utf8' }).status === 0;
+}
+
+function tmuxSendKey(pane, key) {
+  return spawnSync('tmux', ['send-keys', '-t', pane, key], { encoding: 'utf8' }).status === 0;
+}
+
+function tmuxPaneCurrentCommand(pane) {
+  const out = spawnSync('tmux', ['display-message', '-p', '-t', pane, '#{pane_current_command}'], { encoding: 'utf8' });
+  return out.status === 0 ? String(out.stdout || '').trim() : '';
+}
+
+function firstCliCommandName(cli) {
+  const token = String(cli || '').trim().split(/\s+/)[0] || '';
+  return path.basename(token.replace(/^['"]|['"]$/g, ''));
+}
+
+function paneStillAtInteractiveShell(pane, cli) {
+  const current = tmuxPaneCurrentCommand(pane);
+  if (!current) return false;
+  if (!/^(ba|z|fi|c|k|d)?sh$|^fish$|^tcsh$/.test(current)) return false;
+  return current !== firstCliCommandName(cli);
+}
+
 function git(cwd, args, opts = {}) {
   return spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', ...opts });
 }
@@ -113,34 +138,46 @@ function captureVisible(pane) {
 function handleStartupDialogs(pane, cli) {
   const out = captureVisible(pane);
   if (cli.includes('codex') && /Update available|Release notes: .*codex\/releases\/latest|Update now/i.test(out)) {
-    spawnSync('tmux', ['send-keys', '-t', pane, '-l', '--', '1']);
-    spawnSync('tmux', ['send-keys', '-t', pane, 'C-m']);
+    tmuxSendLiteral(pane, '1');
+    tmuxSendKey(pane, 'C-m');
     return true;
   }
   if (/Yes, I trust this folder|Do you trust the contents/i.test(out)) {
-    spawnSync('tmux', ['send-keys', '-t', pane, 'C-m']);
+    tmuxSendKey(pane, 'C-m');
     return true;
   }
   return false;
 }
 
+function cleanupReadinessProbe(pane, probe) {
+  for (let i = 0; i < probe.length; i += 1) {
+    tmuxSendKey(pane, 'BSpace');
+  }
+  sleep(100);
+}
+
 function waitForCliReady(pane, cli, tries = Number(process.env.KONBY_SESSION_READY_TRIES || 120), delayMs = 500) {
+  const probe = `konby-input-ready-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  if (tries > 0) sleep(delayMs);
+
   for (let i = 0; i < tries; i++) {
     if (handleStartupDialogs(pane, cli)) {
       sleep(delayMs);
       continue;
     }
-    const out = tmuxCapture(pane, 200);
-    let ready = false;
-    if (cli.includes('codex')) {
-      ready = /^[ \t]*›/m.test(out);
-    } else if (cli.includes('claude')) {
-      ready = /^[ \t]*❯/m.test(out);
-    } else {
-      ready = /^[ \t]*[›❯>]/m.test(out);
+
+    if (paneStillAtInteractiveShell(pane, cli)) {
+      sleep(delayMs);
+      continue;
     }
-    if (ready) return true;
+
+    if (!tmuxSendLiteral(pane, probe)) return false;
     sleep(delayMs);
+
+    if (tmuxCapture(pane, 200).includes(probe)) {
+      cleanupReadinessProbe(pane, probe);
+      return true;
+    }
   }
   return false;
 }
@@ -299,8 +336,8 @@ function main() {
   sleep(200);
   mark('sleep(200)');
 
-  spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', cliCmd]);
-  spawnSync('tmux', ['send-keys', '-t', paneTarget, 'C-m']);
+  tmuxSendLiteral(paneTarget, cliCmd);
+  tmuxSendKey(paneTarget, 'C-m');
   mark('send CLI command');
 
   if (!waitForCliReady(paneTarget, cliCmd)) {
@@ -308,11 +345,11 @@ function main() {
   }
   mark('waitForCliReady');
 
-  spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', '\x1b[200~']);
+  tmuxSendLiteral(paneTarget, '\x1b[200~');
   spawnSync('tmux', ['set-buffer', '--', prompt]);
   spawnSync('tmux', ['paste-buffer', '-t', paneTarget]);
-  spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', '\x1b[201~']);
-  spawnSync('tmux', ['send-keys', '-t', paneTarget, 'C-m']);
+  tmuxSendLiteral(paneTarget, '\x1b[201~');
+  tmuxSendKey(paneTarget, 'C-m');
   mark('paste prompt');
 
   if (!tmuxHasSession(sessionId)) err(`tmux session failed to stay alive: ${sessionId}`);

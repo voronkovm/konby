@@ -33,6 +33,41 @@ function makeGitRepo(dir) {
   spawnSync('git', ['-C', dir, 'commit', '-m', 'init'], { encoding: 'utf8' });
 }
 
+function makePromptlessCliDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-promptless-cli-'));
+  const script = path.join(dir, 'agent');
+  fs.writeFileSync(script, `#!/usr/bin/env node
+'use strict';
+
+const { execSync } = require('child_process');
+
+process.stdout.write('promptless cli started\\n');
+process.stdin.setEncoding('utf8');
+
+let buffer = '';
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  if (!buffer.includes('\\n')) return;
+
+  const raw = buffer;
+  buffer = '';
+  const command = (raw.match(/konby task move [^\\r\\n]+/) || [])[0];
+  if (!command) return;
+
+  try {
+    execSync(command, { stdio: 'inherit', env: process.env });
+    process.stdout.write('\\npromptless cli completed\\n');
+  } catch (err) {
+    process.stdout.write('\\npromptless cli failed: ' + (err.message || err) + '\\n');
+  }
+});
+
+setInterval(() => {}, 1000);
+`, 'utf8');
+  fs.chmodSync(script, 0o755);
+  return dir;
+}
+
 function runSessionNew(args) {
   return spawnSync(path.join(BIN, 'session_new'), args, {
     encoding: 'utf8',
@@ -105,6 +140,40 @@ test('session_new starts a tmux session with configured CLI', { skip: missingDep
     tmuxKillIfExists(sessionId);
     cleanup(boardDir);
     cleanup(fakeCodexDir);
+    cleanup(workspaceDir);
+  }
+});
+
+test('session_new detects input readiness without a CLI prompt glyph', { skip: missingDep, timeout: 120000 }, () => {
+  const cliDir = makePromptlessCliDir();
+  const boardDir = makeBoard({ preset: 'swe' });
+  setAgentCli(boardDir, path.join(cliDir, 'agent'));
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  let taskFile = null;
+  let sessionId = null;
+  try {
+    taskFile = addTask(boardDir, 'promptless cli task', [
+      '--workspace', workspaceDir,
+      '--workspace_type', 'local',
+      '--assignee', 'coder',
+    ]);
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+    ]);
+    assert.equal(out.status, 0, `session_new failed:\n${out.stderr}`);
+    sessionId = extractSessionId(out.stdout);
+    assert.ok(sessionId, 'should extract session ID from stdout');
+    assert.ok(tmuxHasSession(sessionId), `tmux session should exist: ${sessionId}`);
+    assert.ok(
+      waitForTmuxContent(sessionId, /promptless cli completed/i),
+      'prompt should be injected after probe text becomes visible',
+    );
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(boardDir);
+    cleanup(cliDir);
     cleanup(workspaceDir);
   }
 });
@@ -310,7 +379,7 @@ test('session_new fails when agent file does not exist', { skip: missingDep }, (
 
 test('session_new launches real codex and injects prompt via bracket paste', { skip: missingDep || missingCodex, timeout: 120000 }, () => {
   // Uses real codex binary from PATH — no fake CLI substitution.
-  // Verifies the full pipeline: tmux session created, codex starts and shows ›,
+  // Verifies the full pipeline: tmux session created, input readiness is detected,
   // bracket-paste prompt injection completes, session remains alive.
   const boardDir = makeBoard({ preset: 'swe' });
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
@@ -340,13 +409,6 @@ test('session_new launches real codex and injects prompt via bracket paste', { s
     sessionId = extractSessionId(out.stdout);
     assert.ok(sessionId, 'session ID should appear in session_new output');
     assert.ok(tmuxHasSession(sessionId), `tmux session should exist: ${sessionId}`);
-
-    // session_new only returns after waitForCliReady() found › — so › must be in
-    // the scrollback even though codex may now be processing the injected prompt.
-    assert.ok(
-      waitForTmuxContent(sessionId, /›/, 5, 300),
-      'codex ready prompt (›) should be visible in terminal scrollback',
-    );
 
     // Give codex a moment to process the pasted input, then confirm the session
     // is still alive — i.e. codex did not crash on receiving the prompt.
