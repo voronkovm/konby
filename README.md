@@ -3,7 +3,7 @@
 ## Install
 
 ```bash
-npm i -g konby
+npm i -g @voronkovm/konby
 ```
 
 Add `konby` to your shell PATH (defaults to `zsh`):
@@ -21,7 +21,7 @@ konby install --board my-board --preset swe
 Alternative without a global install:
 
 ```bash
-npx -y konby install --board my-board --preset swe
+npx -y @voronkovm/konby install --board my-board --preset swe
 ```
 
 For Codex sandbox runs, allow `konby` in `~/.codex/rules/default.rules`:
