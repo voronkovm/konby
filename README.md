@@ -1,10 +1,24 @@
 コンベヤ [konbeya], or **konby** for short — meaning "conveyor". Streamline teams of agents using kanban boards.
 
+## Why konby
+
+1. Custom workflows in kanban style.
+2. Tasks data is plain YAML files.
+3. Run Codex or Claude with your subscription, no `-p` flag needed.
+
 ## Install
 
 ```bash
 npm i -g @voronkovm/konby
 ```
+
+Rename the board-local env example and add your API key:
+
+```bash
+mv <board>/.env.example <board>/.env
+```
+
+Then set `OPENAI_API_KEY` in `<board>/.env`.
 
 **Running from a local clone?** Add the `bin/` directory to your shell PATH manually:
 
