@@ -52,6 +52,18 @@ function hasGitChanges(repoRoot) {
   return status.stdout.trim().length > 0;
 }
 
+function ensureGitignoreEntry(repoRoot, entry) {
+  const gitignorePath = path.join(repoRoot, '.gitignore');
+  let content = '';
+  try { content = fs.readFileSync(gitignorePath, 'utf8'); } catch (_) {}
+  const lines = content.split(/\r?\n/);
+  if (lines.some((l) => l.trim() === entry)) return;
+  const newContent = content.endsWith('\n') || content === ''
+    ? `${content}${entry}\n`
+    : `${content}\n${entry}\n`;
+  fs.writeFileSync(gitignorePath, newContent, 'utf8');
+}
+
 function commitPendingRepoChanges(repoRoot, taskAbsPath) {
   if (!hasGitChanges(repoRoot)) return false;
 
@@ -227,6 +239,7 @@ function main() {
       const plan = worktreePlan(repoRoot, taskAbsPath);
       fs.mkdirSync(path.dirname(plan.dir), { recursive: true });
       if (!fs.existsSync(plan.dir)) {
+        ensureGitignoreEntry(repoRoot, '.konby-worktrees');
         commitPendingRepoChanges(repoRoot, taskAbsPath);
         mark('commitPendingRepoChanges');
         const branchExists = spawnSync('git', ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { encoding: 'utf8' }).status === 0;

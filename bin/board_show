@@ -492,6 +492,27 @@ function runTaskPrAsync(stateRef) {
   });
 }
 
+function startConfirmPr(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  stateRef.mode = 'confirm_pr';
+}
+
+function handleConfirmPrInput(stateRef, key) {
+  if (key === '' || key === 'n' || key === 'N') {
+    stateRef.mode = 'normal';
+    setMessage(stateRef, 'PR canceled');
+    return;
+  }
+  if (key === '\r' || key === 'y' || key === 'Y') {
+    stateRef.mode = 'normal';
+    runTaskPrAsync(stateRef);
+  }
+}
+
 function startConfirmMerge(stateRef) {
   const task = selectedTask(stateRef);
   if (!task) {
@@ -621,6 +642,12 @@ function main() {
       return;
     }
 
+    if (stateRef.mode === 'confirm_pr') {
+      handleConfirmPrInput(stateRef, key);
+      redraw(stateRef);
+      return;
+    }
+
     if (stateRef.mode === 'confirm_archive') {
       handleConfirmArchiveInput(stateRef, key);
       redraw(stateRef);
@@ -647,7 +674,7 @@ function main() {
       } else if (key === 't') {
         openTaskTmux(stateRef);
       } else if (key === 'p') {
-        runTaskPrAsync(stateRef);
+        startConfirmPr(stateRef);
       } else if (key === 'g') {
         startConfirmMerge(stateRef);
       } else if (key === 'd') {
@@ -671,7 +698,7 @@ function main() {
     } else if (key === 't') {
       openTaskTmux(stateRef);
     } else if (key === 'p') {
-      runTaskPrAsync(stateRef);
+      startConfirmPr(stateRef);
     } else if (key === 'g') {
       startConfirmMerge(stateRef);
     } else if (key === 'd') {
