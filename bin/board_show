@@ -139,11 +139,33 @@ function updateTaskFile(task, updates) {
   runScriptOrThrow('task_move', args);
 }
 
-function archiveTask(task, projectDir) {
-  const archiveDir = path.join(projectDir, 'tasks', '.archive');
-  fs.mkdirSync(archiveDir, { recursive: true });
-  const dest = path.join(archiveDir, task.file);
-  fs.renameSync(task.path, dest);
+function startConfirmArchive(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  stateRef.mode = 'confirm_archive';
+}
+
+function handleConfirmArchiveInput(stateRef, key) {
+  if (key === '' || key === 'n' || key === 'N') {
+    stateRef.mode = 'normal';
+    setMessage(stateRef, 'Archive canceled');
+    return;
+  }
+  if (key === '\r' || key === 'y' || key === 'Y') {
+    const task = selectedTask(stateRef);
+    stateRef.mode = 'normal';
+    if (!task) return;
+    try {
+      runScriptOrThrow('task_archive', [task.path]);
+      setMessage(stateRef, `Task archived: ${task.file}`);
+      refreshBoard(stateRef);
+    } catch (err) {
+      setMessage(stateRef, `Archive failed: ${err.message}`);
+    }
+  }
 }
 
 function addTaskComment(task, text) {
@@ -554,6 +576,12 @@ function main() {
       return;
     }
 
+    if (stateRef.mode === 'confirm_archive') {
+      handleConfirmArchiveInput(stateRef, key);
+      redraw(stateRef);
+      return;
+    }
+
     if (stateRef.mode === 'details') {
       if (key === '\u001b') {
         stateRef.mode = 'normal';
@@ -570,15 +598,7 @@ function main() {
       } else if (key === 'm') {
         startMovePopup(stateRef);
       } else if (key === 'x') {
-        const task = selectedTask(stateRef);
-        if (task) {
-          archiveTask(task, projectDir);
-          refreshBoard(stateRef);
-          stateRef.mode = 'normal';
-          setMessage(stateRef, `Task archived: ${task.file}`);
-        } else {
-          setMessage(stateRef, 'No task selected');
-        }
+        startConfirmArchive(stateRef);
       } else if (key === 't') {
         openTaskTmux(stateRef);
       } else if (key === 'p') {
@@ -602,14 +622,7 @@ function main() {
     } else if (key === 'm') {
       startMovePopup(stateRef);
     } else if (key === 'x') {
-      const task = selectedTask(stateRef);
-      if (task) {
-        archiveTask(task, projectDir);
-        setMessage(stateRef, `Task archived: ${task.file}`);
-        refreshBoard(stateRef);
-      } else {
-        setMessage(stateRef, 'No task selected');
-      }
+      startConfirmArchive(stateRef);
     } else if (key === 't') {
       openTaskTmux(stateRef);
     } else if (key === 'p') {

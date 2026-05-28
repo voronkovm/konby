@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const { archiveTask } = require('../lib/task_archive');
+
+function usage() {
+  process.stdout.write('Usage: task_archive <task-file>\n');
+}
+
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0) { usage(); process.exit(1); }
+  if (argv[0] === '--help' || argv[0] === '-h') { usage(); process.exit(0); }
+
+  const taskFile = argv[0];
+  try {
+    const result = archiveTask(taskFile);
+    process.stdout.write(`Task archived: ${result.taskFile}\n`);
+  } catch (err) {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  }
+}
+
+main();

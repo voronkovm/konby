@@ -187,3 +187,18 @@ test('buildMoveOptionsFromData deduplicates and skips nullish column names', () 
   assert.deepEqual(opts.column, ['todo', 'done']);
   assert.deepEqual(opts.assignee, ['-', 'agent1']);
 });
+
+test('renderBoard shows confirm_archive prompt with selected task file', () => {
+  const state = makeState();
+  state.mode = 'confirm_archive';
+  const output = renderBoard(state, { width: 80, nowText: 'NOW', dispatchName: 'dispatch.yaml' });
+  assert.match(output, /Archive 1-login\.yaml\? \(y\/Enter = yes, n\/Esc = no\)/);
+});
+
+test('renderTaskDetails shows confirm_archive prompt', () => {
+  const state = makeState();
+  state.selectedCol = 1;
+  state.mode = 'confirm_archive';
+  const output = renderTaskDetails(state, { width: 80, height: 20 });
+  assert.match(output, /Archive 2-api\.yaml\? \(y\/Enter = yes, n\/Esc = no\)/);
+});
