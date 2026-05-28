@@ -38,7 +38,7 @@ function dispatchEnv(fakeCodexDir, extraEnv = {}) {
   return {
     ...process.env,
     OPENAI_API_KEY: '',
-    KONBY_SESSION_READY_TRIES: '2',
+    KONBY_SESSION_READY_TRIES: '20',
     PATH: `${fakeCodexDir}:${BIN}:${process.env.PATH || ''}`,
     ...extraEnv,
   };

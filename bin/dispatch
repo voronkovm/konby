@@ -450,8 +450,6 @@ async function main() {
       return { file: full, data };
     });
 
-    const orphanedClosed = closeOrphanedSessions(projectDir, tasks);
-
     const statusDefaults = readStatusDefaults(dispatch);
     const taskStatusChecks = await evaluateNonNewTasks(projectDir, tasks, statusDefaults, rules);
 
@@ -533,6 +531,8 @@ async function main() {
         if (toColumn) counts.set(toColumn, (counts.get(toColumn) || 0) + 1);
       }
     }
+
+    const orphanedClosed = closeOrphanedSessions(projectDir, tasks);
 
     if (orphanedClosed.length > 0) {
       console.log(`Orphaned sessions closed: ${orphanedClosed.length}`);
