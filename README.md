@@ -6,22 +6,10 @@
 npm i -g @voronkovm/konby
 ```
 
-Add `konby` to your shell PATH (defaults to `zsh`):
+**Running from a local clone?** Add the `bin/` directory to your shell PATH manually:
 
 ```bash
 konby install [--shell zsh|bash]
-```
-
-Optionally create a board in one step:
-
-```bash
-konby install --board my-board --preset swe
-```
-
-Alternative without a global install:
-
-```bash
-npx -y @voronkovm/konby install --board my-board --preset swe
 ```
 
 For Codex sandbox runs, allow `konby` in `~/.codex/rules/default.rules`:
@@ -43,18 +31,11 @@ konby board new <path> [--preset <name>] [--workspace <path>] [--force]
 - Dispatching rules and column definitions: `<path>/dispatch.yaml`
 - Agent roles: `<path>/agents/*.yaml`
 
-### 3. Add and manage tasks
+### 3. Add tasks
 
 ```bash
 # Add a task (stored as <path>/tasks/*.yml)
 konby task add --title "..." [--board <path>]
-
-# Move or update a task
-konby task move <task-file> [--column <column>] [--status <status>] \
-  [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>]
-
-# Append a comment
-konby task comment <task-file> "<comment>"
 ```
 
 ### 4. Run the dispatcher
@@ -71,6 +52,28 @@ konby dispatchd [--log-file <path>] [--board <path>]
 
 ```bash
 konby board show [--board <path>]
+```
+
+![Board view](docs/board-show.png)
+
+Hotkeys:
+- `a` — add new task
+- `d` — dispatch once
+- `↑↓←→` — select task
+- `m` — move task
+- `t` — open tmux session
+- `p` — open GitHub PR
+- `g` — merge branch
+- `x` — archive task
+
+### 6. Steer manually if needed
+```bash
+# Move or update a task
+konby task move <task-file> [--column <column>] [--status <status>] \
+  [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>]
+
+# Append a comment
+konby task comment <task-file> "<comment>"
 ```
 
 ## Additional commands
