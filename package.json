@@ -1,6 +1,6 @@
 {
   "name": "konby",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Konby CLI for board bootstrap and local setup",
   "scripts": {
     "test": "c8 node --test \"test/unit/**/*.test.js\" \"test/integration/**/*.test.js\" \"test/e2e/**/*.test.js\"",
@@ -9,9 +9,17 @@
   },
   "c8": {
     "all": true,
-    "include": ["lib/**/*.js", "bin/*"],
-    "extension": [".js", ""],
-    "reporter": ["text"],
+    "include": [
+      "lib/**/*.js",
+      "bin/*"
+    ],
+    "extension": [
+      ".js",
+      ""
+    ],
+    "reporter": [
+      "text"
+    ],
     "temp-directory": "/tmp/konby-coverage"
   },
   "bin": {
