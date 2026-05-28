@@ -2,9 +2,12 @@
 
 ## Why konby
 
-1. Custom workflows in kanban style.
-2. Tasks data is plain YAML files.
-3. Run Codex or Claude with your subscription, no `-p` flag needed.
+1. Automate teamsn of agents in kanban style.
+2. Custom workflows (agents, columns, statuses, etc), with human review where needed.
+3. Tasks data is plain YAML files.
+4. Run Codex or Claude with your subscription, no `-p` flag needed.
+5. Agents work inside tmux sessions, so you can join any session to steer manually.
+
 
 ## Install
 
