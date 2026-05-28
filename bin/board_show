@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 const { listTaskSessions, sessionIdPrefix } = require('../lib/tmux_sessions');
 const { resolveBoardDir } = require('../lib/workdir');
 const { loadYaml, formatYaml, saveYaml } = require('../lib/yaml');
@@ -417,21 +417,31 @@ function openTaskTmux(stateRef) {
 }
 
 function runDispatchOnce(stateRef) {
-  const dispatchBin = path.join(__dirname, 'dispatch');
-  const out = spawnSync(dispatchBin, ['--board', stateRef.projectDir], { encoding: 'utf8' });
-  const stdout = String(out.stdout || '').trim();
-  const stderr = String(out.stderr || '').trim();
-  const output = stdout || stderr;
+  if (stateRef.dispatching) {
+    setMessage(stateRef, 'Dispatch already running...');
+    return;
+  }
+  stateRef.dispatching = true;
+  setMessage(stateRef, 'Dispatching...');
+  redraw(stateRef);
 
-  if (out.status !== 0) {
-    setMessage(stateRef, output ? `Dispatch failed: ${output}` : `Dispatch failed (exit=${out.status})`);
-    return;
-  }
-  if (output) {
-    setMessage(stateRef, output);
-    return;
-  }
-  setMessage(stateRef, 'Dispatch finished');
+  const dispatchBin = path.join(__dirname, 'dispatch');
+  const child = spawn(dispatchBin, ['--board', stateRef.projectDir]);
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.on('close', (code) => {
+    stateRef.dispatching = false;
+    const output = stdout.trim() || stderr.trim();
+    if (code !== 0) {
+      setMessage(stateRef, output ? `Dispatch failed: ${output}` : `Dispatch failed (exit=${code})`);
+    } else {
+      setMessage(stateRef, output || 'Dispatch finished');
+    }
+    refreshBoard(stateRef);
+    redraw(stateRef);
+  });
 }
 
 function runTaskAction(stateRef, scriptName, successMsg) {
@@ -493,6 +503,7 @@ function main() {
     detailsScroll: 0,
     message: '',
     messageAt: 0,
+    dispatching: false,
   };
   normalizeSelection(stateRef);
   redraw(stateRef);

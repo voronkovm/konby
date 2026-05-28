@@ -36,7 +36,7 @@ function makeGitRepo(dir) {
 function runSessionNew(args) {
   return spawnSync(path.join(BIN, 'session_new'), args, {
     encoding: 'utf8',
-    env: { ...process.env, KONBY_SESSION_READY_TRIES: '2' },
+    env: { ...process.env, KONBY_SESSION_READY_TRIES: '20' },
     timeout: 90000,
   });
 }
@@ -102,8 +102,7 @@ test('session_new starts a tmux session with configured CLI', { skip: missingDep
       'configured CLI output should appear in pane',
     );
   } finally {
-    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
-    else tmuxKillIfExists(sessionId);
+    tmuxKillIfExists(sessionId);
     cleanup(boardDir);
     cleanup(fakeCodexDir);
     cleanup(workspaceDir);
@@ -144,8 +143,7 @@ test('session_new creates git worktree and starts session', { skip: missingDep, 
     const worktreeDir = wsMatch[1].trim().replace(/^['"]|['"]$/g, '');
     assert.ok(fs.existsSync(worktreeDir), `worktree dir should exist: ${worktreeDir}`);
   } finally {
-    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
-    else tmuxKillIfExists(sessionId);
+    tmuxKillIfExists(sessionId);
     cleanup(boardDir);
     cleanup(fakeCodexDir);
     fs.rmSync(repoDir, { recursive: true, force: true });
@@ -192,10 +190,46 @@ test('session_new commits dirty repo state before creating worktree branch', { s
     const showBranchBase = spawnSync('git', ['-C', repoDir, 'show', `${mergeBase.stdout.trim()}:${transcriptPathInRepo}`], { encoding: 'utf8' });
     assert.equal(showBranchBase.stdout, 'base transcript\n');
   } finally {
-    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
-    else tmuxKillIfExists(sessionId);
+    tmuxKillIfExists(sessionId);
     cleanup(fakeCodexDir);
     fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test('session_new fails when CLI prompt not detected within timeout', { skip: missingDep, timeout: 30000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
+  const boardDir = makeBoard({ preset: 'swe' });
+  setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  const sessionTs = '20250101T010000Z';
+  let sessionId = null;
+  try {
+    const taskFile = addTask(boardDir, 'cli prompt timeout task', [
+      '--workspace', workspaceDir,
+      '--workspace_type', 'local',
+      '--assignee', 'coder',
+    ]);
+    sessionId = sessionIdForTask(agentSlugFromFile('agents/coder.yaml'), taskFile, sessionTs);
+    tmuxKillIfExists(sessionId);
+
+    const out = spawnSync(path.join(BIN, 'session_new'), [
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+      '--session-ts', sessionTs,
+    ], {
+      encoding: 'utf8',
+      env: { ...process.env, KONBY_SESSION_READY_TRIES: '0' },
+      timeout: 10000,
+    });
+
+    assert.notEqual(out.status, 0, 'session_new should fail when CLI prompt is not detected');
+    assert.match(out.stderr, /timed out/i);
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(boardDir);
+    cleanup(fakeCodexDir);
+    cleanup(workspaceDir);
   }
 });
 
@@ -206,6 +240,7 @@ test('session_new fails when tmux session already exists', { skip: missingDep, t
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
   const sessionTs = '20250101T000000Z';
   let taskFile = null;
+  let duplicateSessionId = null;
   try {
     taskFile = addTask(boardDir, 'duplicate session task', [
       '--workspace', workspaceDir,
@@ -213,9 +248,8 @@ test('session_new fails when tmux session already exists', { skip: missingDep, t
       '--assignee', 'coder',
     ]);
 
-    // Kill any stale session from a previous run with the same deterministic ID
-    const staleId = sessionIdForTask(agentSlugFromFile('agents/coder.yaml'), taskFile, sessionTs);
-    tmuxKillIfExists(staleId);
+    duplicateSessionId = sessionIdForTask(agentSlugFromFile('agents/coder.yaml'), taskFile, sessionTs);
+    tmuxKillIfExists(duplicateSessionId);
 
     const baseArgs = [
       '--agent', 'agents/coder.yaml',
@@ -231,7 +265,7 @@ test('session_new fails when tmux session already exists', { skip: missingDep, t
     assert.notEqual(second.status, 0, 'second call with same session-ts should fail');
     assert.match(second.stderr, /tmux session already exists/i);
   } finally {
-    if (taskFile) run('task_move', [taskFile, '--assignee', '-', '--status', 'done']);
+    tmuxKillIfExists(duplicateSessionId);
     cleanup(boardDir);
     cleanup(fakeCodexDir);
     cleanup(workspaceDir);

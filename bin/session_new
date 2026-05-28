@@ -93,15 +93,19 @@ function upsertTaskScalar(file, key, value) {
   fs.writeFileSync(file, newContent, 'utf8');
 }
 
+function captureVisible(pane) {
+  const out = spawnSync('tmux', ['capture-pane', '-t', pane, '-p'], { encoding: 'utf8' });
+  return out.status === 0 ? String(out.stdout || '') : '';
+}
+
 function handleStartupDialogs(pane, cli) {
-  const out = tmuxCapture(pane, 200);
+  const out = captureVisible(pane);
   if (cli.includes('codex') && /Update available|Release notes: .*codex\/releases\/latest|Update now/i.test(out)) {
     spawnSync('tmux', ['send-keys', '-t', pane, '-l', '--', '1']);
     spawnSync('tmux', ['send-keys', '-t', pane, 'C-m']);
     return true;
   }
   if (/Yes, I trust this folder|Do you trust the contents/i.test(out)) {
-    spawnSync('tmux', ['send-keys', '-t', pane, '-l', '--', '1']);
     spawnSync('tmux', ['send-keys', '-t', pane, 'C-m']);
     return true;
   }
@@ -117,11 +121,11 @@ function waitForCliReady(pane, cli, tries = Number(process.env.KONBY_SESSION_REA
     const out = tmuxCapture(pane, 200);
     let ready = false;
     if (cli.includes('codex')) {
-      ready = /^[ \t]*›[ \t]*$/m.test(out);
+      ready = /^[ \t]*›/m.test(out);
     } else if (cli.includes('claude')) {
-      ready = /^[ \t]*❯[ \t]*$/m.test(out);
+      ready = /^[ \t]*❯/m.test(out);
     } else {
-      ready = /^[ \t]*[›❯>][ \t]*$/m.test(out);
+      ready = /^[ \t]*[›❯>]/m.test(out);
     }
     if (ready) return true;
     sleep(delayMs);
@@ -130,6 +134,10 @@ function waitForCliReady(pane, cli, tries = Number(process.env.KONBY_SESSION_REA
 }
 
 function main() {
+  const t0 = Date.now();
+  const profile = !!process.env.KONBY_PROFILE;
+  const mark = (label) => { if (profile) process.stderr.write(`[profile] +${Date.now() - t0}ms ${label}\n`); };
+
   let args;
   try {
     args = parseSessionNewArgs(process.argv.slice(2));
@@ -151,6 +159,7 @@ function main() {
     return;
   }
 
+  mark('start');
   const resolveBoardOpts = { startDir: process.env.PWD || process.cwd(), taskFile: args.task };
   if (args.board) resolveBoardOpts.pathHint = args.board;
   const boardDir = resolveBoardDir(resolveBoardOpts);
@@ -162,6 +171,7 @@ function main() {
   if (!agentFile) err(`Agent file not found: ${args.agent}`);
 
   if (spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status !== 0) err('tmux is not installed');
+  mark('tmux -V');
 
   const agentContent = fs.readFileSync(agentFile, 'utf8');
   const taskContent = fs.readFileSync(taskAbsPath, 'utf8');
@@ -189,23 +199,28 @@ function main() {
   }
 
   workspaceDir = resolveWorkspaceDir({ workspaceDir, schemaWorkspaceDefault: '', boardDir });
+  mark('resolve workspace');
 
   if (workspaceType === 'worktree') {
     let repoRoot = null;
     let isWorktreeDir = false;
 
     const insideTree = spawnSync('git', ['-C', workspaceDir, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
+    mark('git is-inside-work-tree');
     if (insideTree.status === 0 && fs.existsSync(workspaceDir)) {
       const gitPath = spawnSync('git', ['-C', workspaceDir, 'rev-parse', '--git-path', '.'], { encoding: 'utf8' });
+      mark('git rev-parse --git-path');
       isWorktreeDir = String(gitPath.stdout || '').includes('/worktrees/');
       if (!isWorktreeDir) {
         repoRoot = spawnSync('git', ['-C', workspaceDir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).stdout.trim();
+        mark('git show-toplevel');
       }
     } else {
       repoRoot = boardDir;
       if (spawnSync('git', ['-C', repoRoot, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' }).status !== 0) {
         err(`workspace_dir is not a git repository: ${workspaceDir}`);
       }
+      mark('git is-inside-work-tree (boardDir)');
     }
 
     if (!isWorktreeDir && repoRoot) {
@@ -213,11 +228,13 @@ function main() {
       fs.mkdirSync(path.dirname(plan.dir), { recursive: true });
       if (!fs.existsSync(plan.dir)) {
         commitPendingRepoChanges(repoRoot, taskAbsPath);
+        mark('commitPendingRepoChanges');
         const branchExists = spawnSync('git', ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { encoding: 'utf8' }).status === 0;
         const wtArgs = branchExists
           ? ['worktree', 'add', '-f', plan.dir, plan.branch]
           : ['worktree', 'add', '-f', '-b', plan.branch, plan.dir];
         spawnSync('git', ['-C', repoRoot, ...wtArgs], { stdio: 'inherit' });
+        mark('git worktree add');
       }
       workspaceDir = plan.dir;
       upsertTaskScalar(taskAbsPath, 'workspace', workspaceDir);
@@ -238,6 +255,7 @@ function main() {
   const transcriptRelToWorkspace = transcriptPathRelativeToWorkspace(transcriptAbs, workspaceDir);
 
   if (tmuxHasSession(sessionId)) err(`tmux session already exists: ${sessionId}`);
+  mark('pre-tmux setup');
 
   const prompt = buildPrompt({
     roleText,
@@ -251,35 +269,43 @@ function main() {
   });
 
   spawnSync('tmux', ['new-session', '-d', '-s', sessionId, '-c', workspaceDir]);
+  mark('tmux new-session');
   spawnSync('tmux', ['set-option', '-t', sessionId, 'mouse', 'on']);
   spawnSync('tmux', ['set-option', '-t', sessionId, 'set-clipboard', 'on']);
   spawnSync('tmux', ['bind-key', '-n', 'C-]', 'detach-client']);
   spawnSync('tmux', ['set-option', '-t', sessionId, 'status-right', 'Back to kanban board: Ctrl+]']);
+  mark('tmux configure options');
 
   const hasPbcopy = spawnSync('which', ['pbcopy'], { encoding: 'utf8' }).status === 0;
   const hasPbpaste = spawnSync('which', ['pbpaste'], { encoding: 'utf8' }).status === 0;
   if (hasPbcopy && hasPbpaste) {
     spawnSync('tmux', ['bind-key', 'p', 'run-shell', 'pbpaste | tmux load-buffer - ; tmux paste-buffer']);
   }
+  mark('tmux clipboard setup');
 
   sleep(200);
+  mark('sleep(200)');
 
   spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', cliCmd]);
   spawnSync('tmux', ['send-keys', '-t', paneTarget, 'C-m']);
+  mark('send CLI command');
 
   if (!waitForCliReady(paneTarget, cliCmd)) {
-    process.stderr.write(`Warning: timed out waiting for CLI input readiness in session ${sessionId}\n`);
+    err(`Timed out waiting for CLI input readiness in session ${sessionId}`);
   }
+  mark('waitForCliReady');
 
   spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', '\x1b[200~']);
   spawnSync('tmux', ['set-buffer', '--', prompt]);
   spawnSync('tmux', ['paste-buffer', '-t', paneTarget]);
   spawnSync('tmux', ['send-keys', '-t', paneTarget, '-l', '--', '\x1b[201~']);
   spawnSync('tmux', ['send-keys', '-t', paneTarget, 'C-m']);
+  mark('paste prompt');
 
   if (!tmuxHasSession(sessionId)) err(`tmux session failed to stay alive: ${sessionId}`);
 
   process.stdout.write(`Started tmux session: ${sessionId}\n`);
+  mark('done');
 }
 
 try {
