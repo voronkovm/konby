@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "Konby CLI for board bootstrap and local setup",
   "scripts": {
-    "test": "c8 node --test \"test/unit/**/*.test.js\" \"test/integration/**/*.test.js\" \"test/e2e/**/*.test.js\""
+    "test": "c8 node --test \"test/unit/**/*.test.js\" \"test/integration/**/*.test.js\" \"test/e2e/**/*.test.js\"",
+    "prepublishOnly": "npm test",
+    "release": "npm version patch && git push --follow-tags && npm publish"
   },
   "c8": {
     "all": true,
@@ -19,9 +21,10 @@
     "bin",
     "lib",
     "presets",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "c8": "^11.0.0"
   }

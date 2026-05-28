@@ -1,15 +1,24 @@
-コンベヤ [konbeya], or konby for short, meaning "conveyer".
+コンベヤ [konbeya], or **konby** for short — meaning "conveyor". Streamline teams of agents using kanban boards.
 
 ## Install
 
-For users who do not have any local `konby` files yet:
-
 ```bash
 npm i -g konby
+```
+
+Add `konby` to your shell PATH (defaults to `zsh`):
+
+```bash
+konby install [--shell zsh|bash]
+```
+
+Optionally create a board in one step:
+
+```bash
 konby install --board my-board --preset swe
 ```
 
-Alternative (without global install, after npm publish):
+Alternative without a global install:
 
 ```bash
 npx -y konby install --board my-board --preset swe
@@ -17,50 +26,94 @@ npx -y konby install --board my-board --preset swe
 
 For Codex sandbox runs, allow `konby` in `~/.codex/rules/default.rules`:
 
-```rules
+```
 prefix_rule(pattern = ["konby"], decision = "allow")
 ```
 
-## Commands
+## Usage
+
+### 1. Create a board
 
 ```bash
-konby install [--shell zsh|bash] [--board <name>] [--dir <path>] [--preset <name>]
 konby board new <path> [--preset <name>] [--workspace <path>] [--force]
-konby board show [--board <path>]
-konby task add --title "..." [--board <path>]
-konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>] [--author <slug>]
-konby task comment <task-file> "<comment>"
-konby task pr <task-file>
-konby task merge <task-file>
-konby session new --agent <agent-file> --task <task-file> [--board <path>] [--transcript <path>]
-konby dispatch [--board <path>]
-konby dispatchd [--log-file <path>] [--board <path>]
+```
 
-dispatch [--board <path>]
-dispatchd [--log-file <path>] [--board <path>]
-board_show [path] [--board <path>]
-task_add [--tasks <tasks_dir_rel>] ... [--board <path>]
-task_move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>] [--author <slug>]
-task_comment <task-file> "<comment>"
-session_new --agent <agent-file> --task <task-file> [--board <path>] [--transcript <path>]
+### 2. Adjust rules if needed
+
+- Dispatching rules and column definitions: `<path>/dispatch.yaml`
+- Agent roles: `<path>/agents/*.yaml`
+
+### 3. Add and manage tasks
+
+```bash
+# Add a task (stored as <path>/tasks/*.yml)
+konby task add --title "..." [--board <path>]
+
+# Move or update a task
+konby task move <task-file> [--column <column>] [--status <status>] \
+  [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>]
+
+# Append a comment
+konby task comment <task-file> "<comment>"
+```
+
+### 4. Run the dispatcher
+
+```bash
+# Run once (nudge)
+konby dispatch [--board <path>]
+
+# Run continuously in background
+konby dispatchd [--log-file <path>] [--board <path>]
+```
+
+### 5. Watch progress
+
+```bash
+konby board show [--board <path>]
+```
+
+## Additional commands
+
+```bash
+# Open a GitHub PR for a task's workspace branch
+konby task pr <task-file>
+
+# Merge task branch into the repo's default branch locally
+konby task merge <task-file>
+
+# Manually start a tmux agent session for one task
+konby session new --agent <agent-file> --task <task-file> [--board <path>]
+```
+
+## Examples
+
+```bash
+konby task add --title "Add OAuth login" --board ./my-board
+
+konby task move ./my-board/tasks/10-login.yml \
+  --column in_progress --status in_progress \
+  --assignee coder --comment "Picked up for implementation"
+
+konby task comment ./my-board/tasks/10-login.yml "Need clarification on acceptance criteria"
+
+konby dispatchd --log-file /tmp/konby-dispatchd.log --board ./my-board
 ```
 
 ## Presets
 
-- presets live under `presets/<preset-name>/`
-- default preset is `swe`
-- each preset must contain:
-  - `dispatch.yaml`
-  - `task.schema.yaml`
-  - `agents/*.yaml`
+Presets live under `presets/<preset-name>/`. The default preset is `swe`.
 
-## What `konby board new <path>` does
+Each preset must contain:
+- `dispatch.yaml`
+- `task.schema.yaml`
+- `agents/*.yaml`
 
-- creates board in `<path>` (relative path is resolved from current directory)
-- creates:
-  - `tasks/`
-  - `agents/`
-  - `transcripts/`
-  - `dispatch.yaml`
-  - `task.schema.yaml`
-  - `agents/*.yaml` from selected preset
+## What `konby board new <path>` creates
+
+- `tasks/` — task YAML files
+- `agents/` — agent definitions
+- `transcripts/` — session transcripts
+- `dispatch.yaml` — dispatching rules
+- `task.schema.yaml` — task field schema
+- `agents/*.yaml` — agent configs from the selected preset
