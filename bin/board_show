@@ -459,6 +459,39 @@ function runTaskAction(stateRef, scriptName, successMsg) {
   }
 }
 
+function runTaskPrAsync(stateRef) {
+  if (stateRef.pring) {
+    setMessage(stateRef, 'PR action already running...');
+    return;
+  }
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  stateRef.pring = true;
+  setMessage(stateRef, 'Running task_pr...');
+  redraw(stateRef);
+
+  const scriptPath = path.join(__dirname, 'task_pr');
+  const child = spawn(scriptPath, [task.path]);
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.on('close', (code) => {
+    stateRef.pring = false;
+    const output = stdout.trim() || stderr.trim();
+    if (code !== 0) {
+      setMessage(stateRef, output ? `PR failed: ${output}` : `PR failed (exit=${code})`);
+    } else {
+      setMessage(stateRef, output || 'PR done');
+    }
+    refreshBoard(stateRef);
+    redraw(stateRef);
+  });
+}
+
 function startConfirmMerge(stateRef) {
   const task = selectedTask(stateRef);
   if (!task) {
@@ -504,6 +537,7 @@ function main() {
     message: '',
     messageAt: 0,
     dispatching: false,
+    pring: false,
   };
   normalizeSelection(stateRef);
   redraw(stateRef);
@@ -613,7 +647,7 @@ function main() {
       } else if (key === 't') {
         openTaskTmux(stateRef);
       } else if (key === 'p') {
-        runTaskAction(stateRef, 'task_pr', 'PR flow executed');
+        runTaskPrAsync(stateRef);
       } else if (key === 'g') {
         startConfirmMerge(stateRef);
       } else if (key === 'd') {
@@ -637,7 +671,7 @@ function main() {
     } else if (key === 't') {
       openTaskTmux(stateRef);
     } else if (key === 'p') {
-      runTaskAction(stateRef, 'task_pr', 'PR flow executed');
+      runTaskPrAsync(stateRef);
     } else if (key === 'g') {
       startConfirmMerge(stateRef);
     } else if (key === 'd') {

@@ -4,6 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { resolveBoardDir } = require('../lib/workdir');
+
+function tryOpenBrowser(url) {
+  const cmd = process.platform === 'darwin' ? 'open'
+    : process.platform === 'win32' ? 'start'
+    : 'xdg-open';
+  try {
+    spawnSync(cmd, [url], { encoding: 'utf8' });
+  } catch (_) {}
+}
 const { taskBranchName } = require('../lib/worktree');
 const { readScalarText } = require('../lib/session_new');
 const { githubRepoSlug } = require('../lib/task_pr');
@@ -87,12 +96,22 @@ function main() {
     currentBranch = targetBranch;
   }
 
+  const statusResult = git(workspace, ['status', '--porcelain']);
+  if (statusResult.status === 0 && statusResult.stdout.trim()) {
+    const addResult = git(workspace, ['add', '-A'], { stdio: 'inherit' });
+    if (addResult.status !== 0) process.exit(addResult.status);
+    const commitResult = git(workspace, ['commit', '-m', 'auto-commit: task changes'], { stdio: 'inherit' });
+    if (commitResult.status !== 0) process.exit(commitResult.status);
+  }
+
   const pushResult = spawnSync('git', ['-C', workspace, 'push', '-u', 'origin', currentBranch], { stdio: 'inherit' });
   if (pushResult.status !== 0) process.exit(pushResult.status);
 
   const existingPr = spawnSync('gh', ['pr', 'view', '--repo', repoSlug, currentBranch, '--json', 'url', '--jq', '.url'], { encoding: 'utf8' });
   if (existingPr.status === 0 && existingPr.stdout.trim()) {
-    process.stdout.write(`PR already exists: ${existingPr.stdout.trim()}\n`);
+    const url = existingPr.stdout.trim();
+    process.stdout.write(`PR already exists: ${url}\n`);
+    tryOpenBrowser(url);
     return;
   }
 
@@ -100,7 +119,9 @@ function main() {
   if (createResult.status !== 0) process.exit(createResult.status);
 
   const newPrUrl = spawnSync('gh', ['pr', 'view', '--repo', repoSlug, currentBranch, '--json', 'url', '--jq', '.url'], { encoding: 'utf8' });
-  process.stdout.write(`Created PR: ${newPrUrl.stdout.trim()}\n`);
+  const url = newPrUrl.stdout.trim();
+  process.stdout.write(`Created PR: ${url}\n`);
+  tryOpenBrowser(url);
 }
 
 try {
