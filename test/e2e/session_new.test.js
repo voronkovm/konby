@@ -14,6 +14,8 @@ const { sessionIdForTask, agentSlugFromFile } = require('../../lib/session_new')
 
 const hasTmux = spawnSync('tmux', ['-V'], { encoding: 'utf8' }).status === 0;
 const missingDep = !hasTmux ? 'tmux not installed' : false;
+const hasRealCodex = spawnSync('which', ['codex'], { encoding: 'utf8' }).status === 0;
+const missingCodex = hasRealCodex ? false : 'codex not in PATH';
 
 // --- helpers ---
 
@@ -267,6 +269,57 @@ test('session_new fails when agent file does not exist', { skip: missingDep }, (
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /Agent file not found/i);
   } finally {
+    cleanup(boardDir);
+    cleanup(workspaceDir);
+  }
+});
+
+test('session_new launches real codex and injects prompt via bracket paste', { skip: missingDep || missingCodex, timeout: 120000 }, () => {
+  // Uses real codex binary from PATH — no fake CLI substitution.
+  // Verifies the full pipeline: tmux session created, codex starts and shows ›,
+  // bracket-paste prompt injection completes, session remains alive.
+  const boardDir = makeBoard({ preset: 'swe' });
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-ws-'));
+  let taskFile = null;
+  let sessionId = null;
+  try {
+    taskFile = addTask(boardDir, 'real codex prompt injection test', [
+      '--workspace', workspaceDir,
+      '--workspace_type', 'local',
+      '--assignee', 'coder',
+    ]);
+
+    // Use real process.env (API keys etc.) and default KONBY_SESSION_READY_TRIES
+    // so session_new waits the full 60 s for codex to show its › prompt.
+    const out = spawnSync(path.join(BIN, 'session_new'), [
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+    ], {
+      encoding: 'utf8',
+      env: { ...process.env },
+      timeout: 120000,
+    });
+
+    assert.equal(out.status, 0, `session_new failed:\n${out.stderr}`);
+    assert.match(out.stdout, /Started tmux session:/);
+    sessionId = extractSessionId(out.stdout);
+    assert.ok(sessionId, 'session ID should appear in session_new output');
+    assert.ok(tmuxHasSession(sessionId), `tmux session should exist: ${sessionId}`);
+
+    // session_new only returns after waitForCliReady() found › — so › must be in
+    // the scrollback even though codex may now be processing the injected prompt.
+    assert.ok(
+      waitForTmuxContent(sessionId, /›/, 5, 300),
+      'codex ready prompt (›) should be visible in terminal scrollback',
+    );
+
+    // Give codex a moment to process the pasted input, then confirm the session
+    // is still alive — i.e. codex did not crash on receiving the prompt.
+    sleep(2000);
+    assert.ok(tmuxHasSession(sessionId), 'tmux session should remain alive after prompt injection');
+  } finally {
+    tmuxKillIfExists(sessionId);
     cleanup(boardDir);
     cleanup(workspaceDir);
   }
