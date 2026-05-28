@@ -2,7 +2,7 @@
 
 ## Why konby
 
-1. Automate teamsn of agents in kanban style.
+1. Automate teams of agents in kanban style.
 2. Custom workflows (agents, columns, statuses, etc), with human review where needed.
 3. Tasks data is plain YAML files.
 4. Run Codex or Claude with your subscription, no `-p` flag needed.
