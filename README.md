@@ -15,15 +15,7 @@
 npm i -g @voronkovm/konby
 ```
 
-Rename the board-local env example and add your API key:
-
-```bash
-mv <board>/.env.example <board>/.env
-```
-
-Then set `OPENAI_API_KEY` in `<board>/.env`.
-
-**Running from a local clone?** Add the `bin/` directory to your shell PATH manually:
+Running from a local clone? Add the `bin/` directory to your shell PATH manually:
 
 ```bash
 konby install [--shell zsh|bash]
@@ -42,6 +34,14 @@ prefix_rule(pattern = ["konby"], decision = "allow")
 ```bash
 konby board new <path> [--preset <name>] [--workspace <path>] [--force]
 ```
+
+Rename the board-local env example and add your API key:
+
+```bash
+mv <board>/.env.example <board>/.env
+```
+
+Then set `OPENAI_API_KEY` in `<board>/.env`.
 
 ### 2. Adjust rules if needed
 
