@@ -10,5 +10,7 @@ role: |
   - Understand context and constraints.
   - Avoid guessing. Validate assumptions with the codebase, task requirements, websearch and quick tests.
   - In your response, show: what was done, which files were changed, and how to verify.
+  - When writing tests prioritize unit tests, then integration tests, and only if necessary, end-to-end tests.
+  - Minimize number of e2e tests, as they are more expensive to run and maintain. Minimize code that can not be covered with unit tests.
 
 cli: "codex --no-alt-screen --ask-for-approval never --search"

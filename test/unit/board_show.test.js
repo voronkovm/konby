@@ -4,14 +4,21 @@ const {
   appendMoveComment,
   buildMoveOptionsFromData,
   buildTasksByColumn,
+  clampLineCursor,
   clampScrollOffset,
+  deleteLineEditBackward,
+  deleteLineEditForward,
+  insertLineEditText,
   moveSelection,
+  moveLineEditCursor,
   nextMoveField,
   normalizeSelection,
   parseBoardShowArgs,
   parseMouseWheelDelta,
   renderBoard,
+  renderEditableLine,
   renderTaskDetails,
+  resolveTaskWorkspaceDir,
   selectedTask,
   taskLabel,
   truncate,
@@ -40,6 +47,7 @@ function makeState() {
     moveField: 'column',
     moveDraft: { column: '', status: '', assignee: '', comment: '' },
     addBuffer: '',
+    addCursor: 0,
     commentBuffer: '',
     detailsScroll: 0,
     message: '',
@@ -96,7 +104,40 @@ test('renderBoard is deterministic with fixed width and date text', () => {
   assert.match(output, /todo \[1\/3\]/);
   assert.match(output, /doing \[1\/1\]/);
   assert.match(output, /unmapped \[1\/-\]/);
+  assert.match(output, /c - open VS Code/);
   assert.match(output, /\x1b\[7m#1 - Login/);
+});
+
+test('renderBoard labels add popup input as description', () => {
+  const state = makeState();
+  state.mode = 'add';
+  state.addBuffer = 'Long task text';
+  state.addCursor = state.addBuffer.length;
+  const output = renderBoard(state, { width: 80, nowText: 'NOW', dispatchName: 'dispatch.yaml' });
+  assert.match(output, /description: Long task text/);
+  assert.doesNotMatch(output, /title: Long task text/);
+});
+
+test('line edit helpers insert, move, and delete at the cursor', () => {
+  let edit = insertLineEditText('abcd', 2, 'XY');
+  assert.deepEqual(edit, { buffer: 'abXYcd', cursor: 4 });
+
+  edit.cursor = moveLineEditCursor(edit.buffer, edit.cursor, -2);
+  assert.equal(edit.cursor, 2);
+
+  edit = deleteLineEditBackward(edit.buffer, edit.cursor);
+  assert.deepEqual(edit, { buffer: 'aXYcd', cursor: 1 });
+
+  edit = deleteLineEditForward(edit.buffer, edit.cursor);
+  assert.deepEqual(edit, { buffer: 'aYcd', cursor: 1 });
+
+  assert.equal(clampLineCursor('abc', 99), 3);
+  assert.equal(clampLineCursor('abc', -1), 0);
+});
+
+test('renderEditableLine marks the current cursor position', () => {
+  assert.equal(renderEditableLine('description: ', 'abc', 1), 'description: a\x1b[7mb\x1b[0mc');
+  assert.equal(renderEditableLine('description: ', 'abc', 3), 'description: abc\x1b[7m \x1b[0m');
 });
 
 test('renderTaskDetails clamps scroll and renders task yaml', () => {
@@ -105,8 +146,21 @@ test('renderTaskDetails clamps scroll and renders task yaml', () => {
   state.detailsScroll = 99;
   const output = renderTaskDetails(state, { width: 80, height: 8 });
   assert.match(output, /^TASK  2-api.yaml/);
+  assert.match(output, /c - open VS Code/);
   assert.match(output, /title: API/);
   assert.ok(state.detailsScroll >= 0);
+});
+
+test('resolveTaskWorkspaceDir uses task workspace, relative to board dir, or board dir fallback', () => {
+  assert.equal(
+    resolveTaskWorkspaceDir({ data: { workspace: '/repo/worktree' } }, '/board'),
+    '/repo/worktree',
+  );
+  assert.equal(
+    resolveTaskWorkspaceDir({ data: { workspace: 'worktree' } }, '/board'),
+    '/board/worktree',
+  );
+  assert.equal(resolveTaskWorkspaceDir({ data: {} }, '/board'), '/board');
 });
 
 test('appendMoveComment normalizes line endings', () => {

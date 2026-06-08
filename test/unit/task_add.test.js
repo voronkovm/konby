@@ -4,6 +4,7 @@ const {
   buildTask,
   coerceWithSchema,
   deriveTaskIdentityFromNumber,
+  firstWordsTitle,
   generateLocalSlug,
   nextTaskNumberFromFileNames,
   parseArgs,
@@ -27,7 +28,7 @@ const schema = {
   },
 };
 
-test('parseArgs supports positional title, boolean flags, key=value, and --set', () => {
+test('parseArgs supports positional args, boolean flags, key=value, and --set', () => {
   assert.deepEqual(
     parseArgs(['--title=Fix login', '--force', '--set', 'estimate=3', 'extra', 'words']),
     {
@@ -93,13 +94,18 @@ test('slug and identity generation are pure and deterministic', () => {
 
 test('parseGeneratedTaskMeta tolerates JSON wrapped in text and normalizes type', () => {
   assert.deepEqual(
-    parseGeneratedTaskMeta('Result: {"slug":"Fix Login","type":"Bug"}', 'fallback title', ['task', 'bug']),
-    { slug: 'fix-login', type: 'bug' },
+    parseGeneratedTaskMeta('Result: {"title":"Fix login","slug":"Fix Login","type":"Bug"}', 'fallback title', ['task', 'bug']),
+    { title: 'Fix login', slug: 'fix-login', type: 'bug' },
   );
   assert.deepEqual(
     parseGeneratedTaskMeta('not json', 'Fallback Title', ['task', 'bug']),
-    { slug: 'not-json', type: 'task' },
+    { title: 'Fallback Title', slug: 'not-json', type: 'task' },
   );
+});
+
+test('firstWordsTitle returns the first five description words', () => {
+  assert.equal(firstWordsTitle('one two three four five six seven'), 'one two three four five');
+  assert.equal(firstWordsTitle(''), 'Task');
 });
 
 test('parseYamlSimple and taskYamlContent keep schema order without id field', () => {

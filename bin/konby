@@ -30,7 +30,7 @@ Usage steps:
     - agents roles in<path>/agents/*.yaml
 
   3. Add a task to the board (stored in <path>/tasks/*.yml):
-    \`konby task add --title "..." [--board <path>]\`
+    \`konby task add --description "..." [--board <path>]\`
     \`konby task move <task-file> [--column <column>] [--status <status>] [--assignee <assignee>] [--comment "<comment>"] [--attachment <path>]\`
     \`konby task comment <task-file> "<comment>"\`
 
@@ -57,7 +57,7 @@ Additional commands:
     Nudge dispatcher once to apply dispatch.yaml rules, move tasks, and trigger agent sessions.
 
 Examples:
-  konby task add --title "Add OAuth login" --board ./my-board
+  konby task add --description "Add OAuth login" --board ./my-board
   konby task move ./my-board/tasks/10-login.yml --column in_progress --status in_progress --assignee coder --comment "Picked up for implementation"
   konby task comment ./my-board/tasks/10-login.yml "Need clarification on acceptance criteria"
   konby dispatchd --log-file /tmp/konby-dispatchd.log --board ./my-board

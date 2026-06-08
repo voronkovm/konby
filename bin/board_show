@@ -12,13 +12,18 @@ const {
   buildMoveOptionsFromData,
   buildTasksByColumn,
   clampScrollOffset,
+  deleteLineEditBackward,
+  deleteLineEditForward,
+  insertLineEditText,
   moveSelection,
+  moveLineEditCursor,
   nextMoveField,
   normalizeSelection,
   parseBoardShowArgs,
   parseMouseWheelDelta,
   renderBoard,
   renderTaskDetails,
+  resolveTaskWorkspaceDir,
   selectedTask,
   uniqInOrder,
 } = require('../lib/board_show');
@@ -180,8 +185,8 @@ function addTaskComment(task, text) {
   saveYaml(task.path, data);
 }
 
-function addTask(projectDir, title) {
-  runScriptOrThrow('task_add', ['--board', projectDir, '--title', title]);
+function addTask(projectDir, description) {
+  runScriptOrThrow('task_add', ['--board', projectDir, '--description', description]);
 }
 
 function startMovePopup(stateRef) {
@@ -295,34 +300,68 @@ function handleMoveInput(stateRef, key) {
 function handleAddInput(stateRef, key) {
   if (key === '\u001b') {
     stateRef.mode = 'normal';
+    stateRef.addBuffer = '';
+    stateRef.addCursor = 0;
     setMessage(stateRef, 'Add canceled');
     return;
   }
+  if (key === '\u001b[D') {
+    stateRef.addCursor = moveLineEditCursor(stateRef.addBuffer, stateRef.addCursor, -1);
+    return;
+  }
+  if (key === '\u001b[C') {
+    stateRef.addCursor = moveLineEditCursor(stateRef.addBuffer, stateRef.addCursor, 1);
+    return;
+  }
+  if (key === '\u001b[H' || key === '\u001b[1~' || key === '\u0001') {
+    stateRef.addCursor = 0;
+    return;
+  }
+  if (key === '\u001b[F' || key === '\u001b[4~' || key === '\u0005') {
+    stateRef.addCursor = String(stateRef.addBuffer || '').length;
+    return;
+  }
+  if (key === '\u001b[3~') {
+    const next = deleteLineEditForward(stateRef.addBuffer, stateRef.addCursor);
+    stateRef.addBuffer = next.buffer;
+    stateRef.addCursor = next.cursor;
+    return;
+  }
   if (key === '\r') {
-    const title = stateRef.addBuffer.trim();
-    if (!title) {
+    const description = stateRef.addBuffer.trim();
+    if (!description) {
       stateRef.mode = 'normal';
-      setMessage(stateRef, 'Empty title, canceled');
+      stateRef.addBuffer = '';
+      stateRef.addCursor = 0;
+      setMessage(stateRef, 'Empty description, canceled');
       return;
     }
     try {
-      addTask(stateRef.projectDir, title);
+      addTask(stateRef.projectDir, description);
       stateRef.mode = 'normal';
       stateRef.addBuffer = '';
+      stateRef.addCursor = 0;
       setMessage(stateRef, 'Task added');
       refreshBoard(stateRef);
     } catch (err) {
       stateRef.mode = 'normal';
       stateRef.addBuffer = '';
+      stateRef.addCursor = 0;
       setMessage(stateRef, `Add failed: ${err.message}`);
     }
     return;
   }
   if (key === '\u007f') {
-    stateRef.addBuffer = stateRef.addBuffer.slice(0, -1);
+    const next = deleteLineEditBackward(stateRef.addBuffer, stateRef.addCursor);
+    stateRef.addBuffer = next.buffer;
+    stateRef.addCursor = next.cursor;
     return;
   }
-  if (key >= ' ' && key <= '~') stateRef.addBuffer += key;
+  if (key >= ' ' && key <= '~') {
+    const next = insertLineEditText(stateRef.addBuffer, stateRef.addCursor, key);
+    stateRef.addBuffer = next.buffer;
+    stateRef.addCursor = next.cursor;
+  }
 }
 
 function startDetails(stateRef) {
@@ -414,6 +453,27 @@ function openTaskTmux(stateRef) {
     return;
   }
   setMessage(stateRef, `Returned from tmux: ${targetSessionId}`);
+}
+
+function openTaskVsCode(stateRef) {
+  const task = selectedTask(stateRef);
+  if (!task) {
+    setMessage(stateRef, 'No task selected');
+    return;
+  }
+  const workspaceDir = resolveTaskWorkspaceDir(task, stateRef.projectDir);
+  if (!fs.existsSync(workspaceDir) || !fs.statSync(workspaceDir).isDirectory()) {
+    setMessage(stateRef, `Workspace dir does not exist: ${workspaceDir}`);
+    return;
+  }
+
+  const out = spawnSync('code', [workspaceDir], { encoding: 'utf8' });
+  if (out.status !== 0) {
+    const detail = (out.error && out.error.message) || String(out.stderr || out.stdout || '').trim();
+    setMessage(stateRef, detail ? `VS Code failed: ${detail}` : `VS Code failed (exit=${out.status})`);
+    return;
+  }
+  setMessage(stateRef, `Opened VS Code: ${workspaceDir}`);
 }
 
 function runDispatchOnce(stateRef) {
@@ -553,6 +613,7 @@ function main() {
     moveOptions: { column: [], status: [], assignee: [] },
     moveIndex: { column: 0, status: 0, assignee: 0 },
     addBuffer: '',
+    addCursor: 0,
     commentBuffer: '',
     detailsScroll: 0,
     message: '',
@@ -662,11 +723,11 @@ function main() {
       } else if (key === '\u001b[B') {
         scrollDetails(stateRef, 1);
       } else if (key === 'c') {
-        stateRef.mode = 'comment';
-        stateRef.commentBuffer = '';
+        openTaskVsCode(stateRef);
       } else if (key === 'a') {
         stateRef.mode = 'add';
         stateRef.addBuffer = '';
+        stateRef.addCursor = 0;
       } else if (key === 'm') {
         startMovePopup(stateRef);
       } else if (key === 'x') {
@@ -691,8 +752,11 @@ function main() {
     else if (key === 'a') {
       stateRef.mode = 'add';
       stateRef.addBuffer = '';
+      stateRef.addCursor = 0;
     } else if (key === 'm') {
       startMovePopup(stateRef);
+    } else if (key === 'c') {
+      openTaskVsCode(stateRef);
     } else if (key === 'x') {
       startConfirmArchive(stateRef);
     } else if (key === 't') {

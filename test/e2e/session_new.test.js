@@ -68,10 +68,10 @@ setInterval(() => {}, 1000);
   return dir;
 }
 
-function runSessionNew(args) {
+function runSessionNew(args, extraEnv = {}) {
   return spawnSync(path.join(BIN, 'session_new'), args, {
     encoding: 'utf8',
-    env: { ...process.env, KONBY_SESSION_READY_TRIES: '20' },
+    env: { ...process.env, KONBY_SESSION_READY_TRIES: '20', ...extraEnv },
     timeout: 90000,
   });
 }
@@ -187,6 +187,16 @@ test('session_new creates git worktree and starts session', { skip: missingDep, 
   let sessionId = null;
   try {
     makeGitRepo(repoDir);
+    const dispatchPath = path.join(boardDir, 'dispatch.yaml');
+    const dispatchContent = fs.readFileSync(dispatchPath, 'utf8');
+    fs.writeFileSync(
+      dispatchPath,
+      dispatchContent.replace(
+        'setup_script: echo "No setup needed"',
+        'setup_script: pwd > konby-setup.cwd',
+      ),
+      'utf8',
+    );
     // workspace_type defaults to 'worktree' in the swe preset schema
     taskFile = addTask(boardDir, 'worktree task', [
       '--workspace', repoDir,
@@ -211,6 +221,11 @@ test('session_new creates git worktree and starts session', { skip: missingDep, 
     assert.ok(wsMatch, 'task YAML should have workspace field');
     const worktreeDir = wsMatch[1].trim().replace(/^['"]|['"]$/g, '');
     assert.ok(fs.existsSync(worktreeDir), `worktree dir should exist: ${worktreeDir}`);
+    assert.equal(
+      fs.readFileSync(path.join(worktreeDir, 'konby-setup.cwd'), 'utf8').trim(),
+      worktreeDir,
+      'setup_script should run inside the created worktree',
+    );
   } finally {
     tmuxKillIfExists(sessionId);
     cleanup(boardDir);
@@ -258,6 +273,106 @@ test('session_new commits dirty repo state before creating worktree branch', { s
     assert.equal(mergeBase.status, 0, mergeBase.stderr);
     const showBranchBase = spawnSync('git', ['-C', repoDir, 'show', `${mergeBase.stdout.trim()}:${transcriptPathInRepo}`], { encoding: 'utf8' });
     assert.equal(showBranchBase.stdout, 'base transcript\n');
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(fakeCodexDir);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test('session_new recreates stale task branch from current source HEAD', { skip: missingDep, timeout: 120000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
+  const boardDir = path.join(repoDir, 'tasks');
+  let sessionId = null;
+  try {
+    makeGitRepo(repoDir);
+    spawnSync('git', ['-C', repoDir, 'checkout', '-b', 'integration-base'], { encoding: 'utf8' });
+    const boardOut = run('board_new', [boardDir, '--preset', 'swe', '--workspace', repoDir]);
+    assert.equal(boardOut.status, 0, `board_new failed:\n${boardOut.stderr}`);
+    setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
+    spawnSync('git', ['-C', repoDir, 'add', '.'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', repoDir, 'commit', '-m', 'add board'], { encoding: 'utf8' });
+    const staleHead = spawnSync('git', ['-C', repoDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+
+    const taskFile = addTask(boardDir, 'refresh old branch task', [
+      '--workspace', repoDir,
+      '--assignee', 'coder',
+    ]);
+    const branch = 'tasks/1-refresh-old-branch-task';
+    spawnSync('git', ['-C', repoDir, 'branch', branch, staleHead], { encoding: 'utf8' });
+
+    const sessionTs = '20250101T020000Z';
+    sessionId = sessionIdForTask(agentSlugFromFile('agents/coder.yaml'), taskFile, sessionTs);
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+      '--session-ts', sessionTs,
+    ], { KONBY_SESSION_READY_TRIES: '0' });
+    assert.notEqual(out.status, 0, 'session_new should stop at the forced readiness timeout');
+    assert.match(out.stderr, /Timed out waiting for CLI input readiness/i);
+
+    const sourceHead = spawnSync('git', ['-C', repoDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+    const taskBranchHead = spawnSync('git', ['-C', repoDir, 'rev-parse', branch], { encoding: 'utf8' }).stdout.trim();
+    assert.notEqual(sourceHead, staleHead, 'session_new should commit task state before creating the worktree');
+    assert.equal(taskBranchHead, sourceHead, 'task branch should be recreated from current source HEAD');
+  } finally {
+    tmuxKillIfExists(sessionId);
+    cleanup(fakeCodexDir);
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test('session_new creates worktree under git root when task workspace path is missing', { skip: missingDep, timeout: 120000 }, () => {
+  const fakeCodexDir = makeFakeCodexDir();
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'konby-repo-'));
+  const boardDir = path.join(repoDir, 'tasks');
+  let sessionId = null;
+  try {
+    makeGitRepo(repoDir);
+    const boardOut = run('board_new', [boardDir, '--preset', 'swe', '--workspace', repoDir]);
+    assert.equal(boardOut.status, 0, `board_new failed:\n${boardOut.stderr}`);
+    setAgentCli(boardDir, path.join(fakeCodexDir, 'codex'));
+    const dispatchPath = path.join(boardDir, 'dispatch.yaml');
+    const dispatchContent = fs.readFileSync(dispatchPath, 'utf8');
+    fs.writeFileSync(
+      dispatchPath,
+      dispatchContent.replace(
+        'setup_script: echo "No setup needed"',
+        'setup_script: pwd > konby-setup.cwd',
+      ),
+      'utf8',
+    );
+    spawnSync('git', ['-C', repoDir, 'add', '.'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', repoDir, 'commit', '-m', 'add board'], { encoding: 'utf8' });
+
+    const missingWorkspace = path.join(boardDir, '.konby-worktrees', 'tasks__1-missing-workspace-task');
+    const taskFile = addTask(boardDir, 'missing workspace task', [
+      '--workspace', missingWorkspace,
+      '--assignee', 'coder',
+    ]);
+
+    const sessionTs = '20250101T030000Z';
+    sessionId = sessionIdForTask(agentSlugFromFile('agents/coder.yaml'), taskFile, sessionTs);
+    const out = runSessionNew([
+      '--agent', 'agents/coder.yaml',
+      '--task', taskFile,
+      '--board', boardDir,
+      '--session-ts', sessionTs,
+    ], { KONBY_SESSION_READY_TRIES: '0' });
+    assert.notEqual(out.status, 0, 'session_new should stop at the forced readiness timeout');
+    assert.match(out.stderr, /Timed out waiting for CLI input readiness/i);
+
+    const taskContent = fs.readFileSync(taskFile, 'utf8');
+    const expectedRoot = fs.realpathSync(repoDir);
+    assert.match(taskContent, new RegExp(`^workspace:\\s*${expectedRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/\\.konby-worktrees/tasks__1-missing-workspace-task$`, 'm'));
+    const worktreeDir = path.join(expectedRoot, '.konby-worktrees', 'tasks__1-missing-workspace-task');
+    assert.equal(
+      fs.readFileSync(path.join(worktreeDir, 'konby-setup.cwd'), 'utf8').trim(),
+      worktreeDir,
+      'setup_script should run inside the created worktree before agent startup',
+    );
   } finally {
     tmuxKillIfExists(sessionId);
     cleanup(fakeCodexDir);

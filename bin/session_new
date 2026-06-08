@@ -22,7 +22,7 @@ const {
   worktreePlan,
   yamlEscapeScalar,
 } = require('../lib/session_new');
-const { yamlScalar } = require('../lib/yaml');
+const { loadYaml, yamlScalar } = require('../lib/yaml');
 
 function err(msg) {
   process.stderr.write(`Error: ${msg}\n`);
@@ -104,6 +104,79 @@ function commitPendingRepoChanges(repoRoot, taskAbsPath) {
   );
   if (commitResult.status !== 0) process.exit(commitResult.status);
   return true;
+}
+
+function currentHead(repoRoot) {
+  const result = git(repoRoot, ['rev-parse', '--verify', 'HEAD']);
+  if (result.status !== 0) err(`Failed to resolve HEAD: ${result.stderr.trim()}`);
+  return result.stdout.trim();
+}
+
+function gitWorktrees(repoRoot) {
+  const result = git(repoRoot, ['worktree', 'list', '--porcelain']);
+  if (result.status !== 0) err(`Failed to list git worktrees: ${result.stderr.trim()}`);
+
+  const out = [];
+  let current = null;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) {
+      if (current) out.push(current);
+      current = { path: line.slice('worktree '.length), branch: '' };
+    } else if (current && line.startsWith('branch ')) {
+      current.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '');
+    }
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+function removeTaskWorktrees(repoRoot, branchName, plannedDir) {
+  const plannedAbs = path.resolve(plannedDir);
+  const paths = new Set();
+
+  for (const wt of gitWorktrees(repoRoot)) {
+    if (wt.branch === branchName && path.resolve(wt.path) !== path.resolve(repoRoot)) paths.add(wt.path);
+  }
+  if (fs.existsSync(plannedDir)) paths.add(plannedDir);
+
+  for (const wtPath of paths) {
+    const result = git(repoRoot, ['worktree', 'remove', '--force', wtPath], { stdio: 'inherit' });
+    if (result.status !== 0 && path.resolve(wtPath) === plannedAbs && wtPath.includes(`${path.sep}.konby-worktrees${path.sep}`)) {
+      fs.rmSync(wtPath, { recursive: true, force: true });
+      git(repoRoot, ['worktree', 'prune']);
+    } else if (result.status !== 0) {
+      process.exit(result.status);
+    }
+  }
+}
+
+function deleteBranchIfExists(repoRoot, branchName) {
+  const exists = git(repoRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`]).status === 0;
+  if (!exists) return;
+
+  const result = git(repoRoot, ['branch', '-D', branchName], { stdio: 'inherit' });
+  if (result.status !== 0) process.exit(result.status);
+}
+
+function dispatchWorktreeSetupScript(boardDir) {
+  const dispatchPath = path.join(boardDir, 'dispatch.yaml');
+  if (!fs.existsSync(dispatchPath)) return '';
+  const dispatch = loadYaml(dispatchPath);
+  return String(((dispatch.worktree || {}).setup_script) || '').trim();
+}
+
+function runWorktreeSetupScript(script, worktreeDir) {
+  if (!script) return;
+  const result = spawnSync(script, {
+    cwd: worktreeDir,
+    shell: true,
+    stdio: 'inherit',
+  });
+  if (result.error) err(`Failed to run worktree setup_script: ${result.error.message}`);
+  if (result.status !== 0) {
+    process.stderr.write(`Error: worktree setup_script failed with exit code ${result.status || 1}\n`);
+    process.exit(result.status || 1);
+  }
 }
 
 function resolveAgentFile(input, boardDir) {
@@ -265,10 +338,11 @@ function main() {
         mark('git show-toplevel');
       }
     } else {
-      repoRoot = boardDir;
-      if (spawnSync('git', ['-C', repoRoot, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' }).status !== 0) {
+      const boardInsideTree = spawnSync('git', ['-C', boardDir, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8' });
+      if (boardInsideTree.status !== 0) {
         err(`workspace_dir is not a git repository: ${workspaceDir}`);
       }
+      repoRoot = spawnSync('git', ['-C', boardDir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).stdout.trim();
       mark('git is-inside-work-tree (boardDir)');
     }
 
@@ -279,12 +353,17 @@ function main() {
         ensureGitignoreEntry(repoRoot, '.konby-worktrees');
         commitPendingRepoChanges(repoRoot, taskAbsPath);
         mark('commitPendingRepoChanges');
-        const branchExists = spawnSync('git', ['-C', repoRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${plan.branch}`], { encoding: 'utf8' }).status === 0;
-        const wtArgs = branchExists
-          ? ['worktree', 'add', '-f', plan.dir, plan.branch]
-          : ['worktree', 'add', '-f', '-b', plan.branch, plan.dir];
-        spawnSync('git', ['-C', repoRoot, ...wtArgs], { stdio: 'inherit' });
+        const baseHead = currentHead(repoRoot);
+        removeTaskWorktrees(repoRoot, plan.branch, plan.dir);
+        deleteBranchIfExists(repoRoot, plan.branch);
+        const addWorktree = spawnSync('git', ['-C', repoRoot, 'worktree', 'add', '-f', '-b', plan.branch, plan.dir, baseHead], { stdio: 'inherit' });
+        if (addWorktree.status !== 0) process.exit(addWorktree.status);
         mark('git worktree add');
+        const setupScript = dispatchWorktreeSetupScript(boardDir);
+        if (setupScript) {
+          runWorktreeSetupScript(setupScript, plan.dir);
+          mark('worktree setup_script');
+        }
       }
       workspaceDir = plan.dir;
       upsertTaskScalar(taskAbsPath, 'workspace', workspaceDir);

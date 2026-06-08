@@ -57,6 +57,27 @@ test('task_move updates column and status together', () => {
   }
 });
 
+test('task_move does not multiply escapes in quoted task fields', () => {
+  const dir = makeBoard();
+  try {
+    const description = 'Line one\rLine two with "quotes" and \\ slash';
+    const taskPath = addTask(dir, 'Escaped task', ['--description', description]);
+    const before = fs.readFileSync(taskPath, 'utf8');
+
+    for (const status of ['in_progress', 'blocked', 'done']) {
+      const out = run('task_move', [taskPath, '--status', status]);
+      assert.equal(out.status, 0, out.stderr);
+    }
+
+    const after = fs.readFileSync(taskPath, 'utf8');
+    const beforeDescription = before.match(/^description: .+$/m)[0];
+    const afterDescription = after.match(/^description: .+$/m)[0];
+    assert.equal(afterDescription, beforeDescription);
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test('task_move exits with error for missing task file', () => {
   const out = run('task_move', ['/tmp/nonexistent-task.yaml', '--column', 'done']);
   assert.notEqual(out.status, 0);

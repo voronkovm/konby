@@ -34,9 +34,25 @@ test('parseYamlSimple parses nested objects and arrays', () => {
   });
 });
 
+test('parseYamlSimple parses YAML folded block scalars', () => {
+  assert.deepEqual(parseYamlSimple([
+    'title: Implement i18n for all pages',
+    'description: >',
+    '  Implement i18n for all pages of canvs.io on the server side, not on',
+    '  the JS/browser side.',
+    '  EN is the default language.',
+    'type: task',
+  ].join('\n')), {
+    title: 'Implement i18n for all pages',
+    description: 'Implement i18n for all pages of canvs.io on the server side, not on the JS/browser side. EN is the default language.\n',
+    type: 'task',
+  });
+});
+
 test('formatYaml and yamlScalar produce stable simple YAML', () => {
   assert.equal(yamlScalar('/tmp/workspace'), '/tmp/workspace');
   assert.equal(yamlScalar('/tmp/work space'), '"/tmp/work space"');
+  assert.equal(yamlScalar('-'), '"-"');
   assert.equal(formatYaml({
     title: 'Test task',
     tags: ['api', 'ui'],
@@ -49,6 +65,32 @@ test('formatYaml and yamlScalar produce stable simple YAML', () => {
     'nested:',
     '  ok: true',
   ].join('\n'));
+});
+
+test('parseYamlSimple accepts legacy dash scalar output', () => {
+  assert.deepEqual(parseYamlSimple([
+    'assignee: -',
+    'board:',
+    '  columns:',
+    '    - name: done',
+    '      wip_limit: -',
+  ].join('\n')), {
+    assignee: '-',
+    board: {
+      columns: [
+        { name: 'done', wip_limit: '-' },
+      ],
+    },
+  });
+});
+
+test('parseYamlSimple decodes double-quoted JSON escapes emitted by formatYaml', () => {
+  const value = 'Line one\rLine two with "quotes" and \\ slash';
+  const formatted = formatYaml({ description: value });
+  const parsed = parseYamlSimple(formatted);
+
+  assert.equal(parsed.description, value);
+  assert.equal(formatYaml(parsed), formatted);
 });
 
 test('parseInlineList parses comma-separated values including scalars', () => {

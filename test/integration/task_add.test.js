@@ -31,13 +31,48 @@ test('task_add yaml contains required fields', () => {
   }
 });
 
-test('task_add sets title from argument', () => {
+test('task_add stores positional task text as description and creates fallback title', () => {
   const dir = makeBoard();
   try {
-    const taskPath = addTask(dir, 'My specific title');
+    const out = run('task_add', ['--board', dir, 'My specific task description with extra words']);
+    assert.equal(out.status, 0, out.stderr || out.stdout);
+    const match = out.stdout.match(/Task added to (.+)/);
+    const taskPath = match && match[1].trim();
+    assert.ok(taskPath);
     const content = fs.readFileSync(taskPath, 'utf8');
     // YAML serializer quotes strings with spaces
-    assert.match(content, /My specific title/);
+    assert.match(content, /title: "My specific task description with"/);
+    assert.match(content, /description: "My specific task description with extra words"/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('task_add keeps explicit --title as title', () => {
+  const dir = makeBoard();
+  try {
+    const taskPath = addTask(dir, 'My explicit title');
+    const content = fs.readFileSync(taskPath, 'utf8');
+    assert.match(content, /title: "My explicit title"/);
+    assert.doesNotMatch(content, /description:/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('task_add accepts long description text', () => {
+  const dir = makeBoard();
+  try {
+    const longDescription = `one two three four five six ${'details '.repeat(1500)}`.trim();
+    assert.ok(longDescription.length > 10000);
+    const out = run('task_add', ['--board', dir, '--description', longDescription]);
+    assert.equal(out.status, 0, out.stderr || out.stdout);
+    const match = out.stdout.match(/Task added to (.+)/);
+    const taskPath = match && match[1].trim();
+    assert.ok(taskPath);
+    const content = fs.readFileSync(taskPath, 'utf8');
+    assert.match(content, /title: "one two three four five"/);
+    assert.ok(content.includes(longDescription));
   } finally {
     cleanup(dir);
   }

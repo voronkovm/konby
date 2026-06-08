@@ -6,6 +6,7 @@ const { resolveBoardDir } = require('../lib/workdir');
 const {
   buildTask,
   deriveTaskIdentityFromNumber,
+  firstWordsTitle,
   generateLocalSlug,
   nextTaskNumberFromFileNames,
   normalizeTaskType,
@@ -25,8 +26,9 @@ function nextTaskNumber(dirPath) {
 }
 
 async function generateTaskMetaWithOpenAI(text, allowedTypes) {
+  const fallbackTitle = firstWordsTitle(text, 5);
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return { slug: generateLocalSlug(text, 5), type: 'task' };
+  if (!apiKey) return { title: fallbackTitle, slug: generateLocalSlug(fallbackTitle, 5), type: 'task' };
 
   const baseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
   const endpoint = process.env.OPENAI_API_ENDPOINT || '/chat/completions';
@@ -45,11 +47,11 @@ async function generateTaskMetaWithOpenAI(text, allowedTypes) {
       messages: [
         {
           role: 'system',
-          content: `Translate the task title to English and classify its type. Respond only as JSON: {"slug":"...","type":"..."}. Allowed types: ${allowedTypes.join(', ')}. Slug: lowercase latin letters, numbers, hyphens, max 5 words.`,
+          content: `Create a concise task title, translate it to English for slug generation, and classify the task type. Respond only as JSON: {"title":"...","slug":"...","type":"..."}. Allowed types: ${allowedTypes.join(', ')}. Title: max 5 words, natural language, no trailing period. Slug: lowercase latin letters, numbers, hyphens, max 5 words.`,
         },
         {
           role: 'user',
-          content: `Task title: ${text}`,
+          content: `Task description:\n${text}`,
         },
       ],
     }),
@@ -57,7 +59,7 @@ async function generateTaskMetaWithOpenAI(text, allowedTypes) {
 
   try {
     if (!response.ok) {
-      return { slug: generateLocalSlug(text, 5), type: 'task' };
+      return { title: fallbackTitle, slug: generateLocalSlug(fallbackTitle, 5), type: 'task' };
     }
 
     const data = await response.json();
@@ -72,8 +74,31 @@ async function generateTaskMetaWithOpenAI(text, allowedTypes) {
 
     return parseGeneratedTaskMeta(content, text, allowedTypes);
   } catch (_) {
-    return { slug: generateLocalSlug(text, 5), type: 'task' };
+    return { title: fallbackTitle, slug: generateLocalSlug(fallbackTitle, 5), type: 'task' };
   }
+}
+
+function normalizeTaskDescriptionArgs(args) {
+  const out = {
+    ...args,
+    values: { ...args.values },
+    set: [...args.set],
+  };
+
+  const positionalDescription = Array.isArray(out._) ? out._.join(' ').trim() : '';
+  const explicitDescription = typeof out.values.description === 'string' ? out.values.description.trim() : '';
+
+  const hasSetDescription = out.set.some((pair) => pair.startsWith('description='));
+
+  if (!explicitDescription && !hasSetDescription) {
+    if (positionalDescription) {
+      out.values.description = positionalDescription;
+    }
+  }
+
+  out._ = [];
+
+  return out;
 }
 
 async function writeTaskFile(dirPath, obj, force, schema) {
@@ -128,7 +153,8 @@ async function main() {
   }
 
   const schema = parseYamlSimple(fs.readFileSync(schemaPath, 'utf8'));
-  const task = buildTask(argsForTask, schema);
+  const normalizedArgsForTask = normalizeTaskDescriptionArgs(argsForTask);
+  const task = buildTask(normalizedArgsForTask, schema);
   const schemaTypes =
     schema &&
     schema.properties &&
@@ -136,11 +162,16 @@ async function main() {
     Array.isArray(schema.properties.type.enum)
       ? schema.properties.type.enum
       : ['task'];
-  const meta = await generateTaskMetaWithOpenAI(task.title || '', schemaTypes);
+  const taskDescription = task.description || task.title || '';
+  const meta = await generateTaskMetaWithOpenAI(taskDescription, schemaTypes);
+
+  if (!task.title || typeof task.title !== 'string' || !task.title.trim()) {
+    task.title = meta.title;
+  }
 
   const userProvidedType =
-    Object.prototype.hasOwnProperty.call(argsForTask.values, 'type') ||
-    argsForTask.set.some((pair) => pair.startsWith('type='));
+    Object.prototype.hasOwnProperty.call(normalizedArgsForTask.values, 'type') ||
+    normalizedArgsForTask.set.some((pair) => pair.startsWith('type='));
 
   if (!userProvidedType) {
     task.type = normalizeTaskType(meta.type, schemaTypes);

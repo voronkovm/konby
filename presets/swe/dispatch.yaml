@@ -1,7 +1,7 @@
 board:
   columns:
     - name: backlog
-      wip_limit: -
+      wip_limit: "-"
     - name: refinement
       wip_limit: 5
     - name: development
@@ -9,13 +9,17 @@ board:
     - name: review
       wip_limit: 2
     - name: done
-      wip_limit: -
+      wip_limit: "-"
 
 defaults:
   status_todo: todo
   status_in_progress: in_progress
   status_success: done
   status_failure: blocked
+
+worktree:
+  setup_script: echo "No setup needed"
+  cleanup_script: echo "No cleanup needed"
 
 rules:
   - when:

@@ -35,5 +35,8 @@
   "license": "MIT",
   "devDependencies": {
     "c8": "^11.0.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }

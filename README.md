@@ -38,7 +38,7 @@ konby board new <path> [--preset <name>] [--workspace <path>] [--force]
 Rename the board-local env example and add your API key:
 
 ```bash
-mv <board>/.env.example <board>/.env
+mv <path>/.env.example <path>/.env
 ```
 
 Then set `OPENAI_API_KEY` in `<board>/.env`.
@@ -52,7 +52,7 @@ Then set `OPENAI_API_KEY` in `<board>/.env`.
 
 ```bash
 # Add a task (stored as <path>/tasks/*.yml)
-konby task add --title "..." [--board <path>]
+konby task add --description "..." [--board <path>]
 ```
 
 ### 4. Run the dispatcher
@@ -78,9 +78,10 @@ Hotkeys:
 - `d` — dispatch once
 - `↑↓←→` — select task
 - `m` — move task
+- `c` — open VS Code in task workspace
 - `t` — open tmux session
 - `p` — open GitHub PR
-- `g` — merge branch
+- `g` — merge branch locally
 - `x` — archive task
 
 ### 6. Steer manually if needed
@@ -109,7 +110,7 @@ konby session new --agent <agent-file> --task <task-file> [--board <path>]
 ## Examples
 
 ```bash
-konby task add --title "Add OAuth login" --board ./my-board
+konby task add --description "Add OAuth login" --board ./my-board
 
 konby task move ./my-board/tasks/10-login.yml \
   --column in_progress --status in_progress \
